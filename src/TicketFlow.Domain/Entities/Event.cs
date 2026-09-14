@@ -26,9 +26,9 @@ public class Event : Entity
         Description = description ?? string.Empty;
     }
 
-    public EventSession AddSession(string venueName, DateTime startsAtUtc)
+    public EventSession AddSession(string venueName, DateTime startsAtUtc, decimal ticketPrice)
     {
-        var session = new EventSession(Id, venueName, startsAtUtc);
+        var session = new EventSession(Id, venueName, startsAtUtc, ticketPrice);
         _sessions.Add(session);
         return session;
     }
