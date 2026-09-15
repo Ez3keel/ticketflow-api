@@ -8,16 +8,19 @@ namespace TicketFlow.Application.Events;
 public class EventCatalogService
 {
     private readonly IEventRepository _eventRepository;
+    private readonly IUnitOfWork _unitOfWork;
 
-    public EventCatalogService(IEventRepository eventRepository)
+    public EventCatalogService(IEventRepository eventRepository, IUnitOfWork unitOfWork)
     {
         _eventRepository = eventRepository;
+        _unitOfWork = unitOfWork;
     }
 
     public async Task<EventDto> CreateEventAsync(CreateEventRequest request, CancellationToken cancellationToken = default)
     {
         var @event = new Event(request.Name, request.Description);
         await _eventRepository.AddAsync(@event, cancellationToken);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
         return ToEventDto(@event);
     }
 
@@ -34,6 +37,7 @@ public class EventCatalogService
 
         @event.AddSession(request.VenueName, request.StartsAtUtc, request.TicketPrice);
         await _eventRepository.UpdateAsync(@event, cancellationToken);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
 
         return ToEventDto(@event);
     }
@@ -48,6 +52,7 @@ public class EventCatalogService
             session.AddSeat(request.Row, number);
 
         await _eventRepository.UpdateAsync(@event, cancellationToken);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
 
         return ToSessionDetailDto(session);
     }

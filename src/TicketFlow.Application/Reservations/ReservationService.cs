@@ -13,15 +13,18 @@ public class ReservationService
     private readonly IEventRepository _eventRepository;
     private readonly IOrderRepository _orderRepository;
     private readonly IDateTimeProvider _dateTimeProvider;
+    private readonly IUnitOfWork _unitOfWork;
 
     public ReservationService(
         IEventRepository eventRepository,
         IOrderRepository orderRepository,
-        IDateTimeProvider dateTimeProvider)
+        IDateTimeProvider dateTimeProvider,
+        IUnitOfWork unitOfWork)
     {
         _eventRepository = eventRepository;
         _orderRepository = orderRepository;
         _dateTimeProvider = dateTimeProvider;
+        _unitOfWork = unitOfWork;
     }
 
     public async Task<OrderDto> ReserveSeatsAsync(Guid userId, ReserveSeatsRequest request, CancellationToken cancellationToken = default)
@@ -55,6 +58,7 @@ public class ReservationService
 
         await _eventRepository.UpdateAsync(@event, cancellationToken);
         await _orderRepository.AddAsync(order, cancellationToken);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
 
         return ToOrderDto(order);
     }
@@ -73,6 +77,7 @@ public class ReservationService
 
         await _eventRepository.UpdateAsync(@event, cancellationToken);
         await _orderRepository.UpdateAsync(order, cancellationToken);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
 
         return ToOrderDto(order);
     }
@@ -91,6 +96,7 @@ public class ReservationService
 
         await _eventRepository.UpdateAsync(@event, cancellationToken);
         await _orderRepository.UpdateAsync(order, cancellationToken);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
 
         return ToOrderDto(order);
     }

@@ -13,17 +13,20 @@ public class AuthService
     private readonly IPasswordHasher _passwordHasher;
     private readonly IJwtTokenGenerator _tokenGenerator;
     private readonly IDateTimeProvider _dateTimeProvider;
+    private readonly IUnitOfWork _unitOfWork;
 
     public AuthService(
         IUserRepository userRepository,
         IPasswordHasher passwordHasher,
         IJwtTokenGenerator tokenGenerator,
-        IDateTimeProvider dateTimeProvider)
+        IDateTimeProvider dateTimeProvider,
+        IUnitOfWork unitOfWork)
     {
         _userRepository = userRepository;
         _passwordHasher = passwordHasher;
         _tokenGenerator = tokenGenerator;
         _dateTimeProvider = dateTimeProvider;
+        _unitOfWork = unitOfWork;
     }
 
     public async Task<AuthResponse> RegisterAsync(RegisterRequest request, CancellationToken cancellationToken = default)
@@ -36,6 +39,7 @@ public class AuthService
         var response = IssueTokens(user);
 
         await _userRepository.AddAsync(user, cancellationToken);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
         return response;
     }
 
@@ -49,6 +53,7 @@ public class AuthService
 
         var response = IssueTokens(user);
         await _userRepository.UpdateAsync(user, cancellationToken);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
         return response;
     }
 
@@ -62,6 +67,7 @@ public class AuthService
 
         user.RotateRefreshToken(request.RefreshToken, newRefreshToken, utcNow.Add(RefreshTokenLifetime), utcNow);
         await _userRepository.UpdateAsync(user, cancellationToken);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
 
         var accessToken = _tokenGenerator.GenerateAccessToken(user);
         return new AuthResponse(accessToken, newRefreshToken, utcNow.AddMinutes(15));
