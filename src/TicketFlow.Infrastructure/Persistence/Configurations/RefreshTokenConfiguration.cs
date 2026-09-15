@@ -10,6 +10,7 @@ public class RefreshTokenConfiguration : IEntityTypeConfiguration<RefreshToken>
     {
         builder.ToTable("RefreshTokens");
         builder.HasKey(t => t.Id);
+        builder.Property(t => t.Id).ValueGeneratedNever();
 
         builder.Property(t => t.Token).IsRequired();
         builder.HasIndex(t => t.Token).IsUnique();

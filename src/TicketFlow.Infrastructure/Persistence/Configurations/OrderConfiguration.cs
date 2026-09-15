@@ -10,6 +10,7 @@ public class OrderConfiguration : IEntityTypeConfiguration<Order>
     {
         builder.ToTable("Orders");
         builder.HasKey(o => o.Id);
+        builder.Property(o => o.Id).ValueGeneratedNever();
 
         builder.Property(o => o.Status).HasConversion<string>().HasMaxLength(20);
         builder.Ignore(o => o.TotalAmount);

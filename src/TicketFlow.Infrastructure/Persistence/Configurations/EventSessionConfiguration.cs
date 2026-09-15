@@ -10,6 +10,7 @@ public class EventSessionConfiguration : IEntityTypeConfiguration<EventSession>
     {
         builder.ToTable("EventSessions");
         builder.HasKey(s => s.Id);
+        builder.Property(s => s.Id).ValueGeneratedNever();
 
         builder.Property(s => s.VenueName).IsRequired().HasMaxLength(200);
         builder.Property(s => s.TicketPrice).HasPrecision(10, 2);

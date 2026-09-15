@@ -193,10 +193,82 @@ um documento OpenAPI — a diferença é só a camada de apresentação.
 
 ---
 
+## Fase 2 — PostgreSQL + EF Core
+
+**O que foi feito**: os repositórios em memória foram substituídos por
+implementações EF Core (`EfEventRepository`, `EfOrderRepository`,
+`EfUserRepository`) sobre um `TicketFlowDbContext` + PostgreSQL rodando em
+Docker. As entidades de domínio **não mudaram nada** — nenhum atributo de
+EF, nenhuma anotação, nenhum setter público novo. Todo o mapeamento vive em
+classes `IEntityTypeConfiguration<T>` separadas, dentro da `Infrastructure`.
+
+**Por que isso confirma a Fase 0/1**: essa era exatamente a promessa da
+Clean Architecture — trocar "onde os dados vivem" sem tocar em "como as
+regras de negócio funcionam". O `Seat.Reserve()`, `Order.Confirm()`, etc.
+continuam exatamente iguais; só o que estava por trás de `IEventRepository`
+mudou.
+
+**Como o EF Core lida com coleções encapsuladas**: `Event.Sessions` é
+`IReadOnlyCollection<EventSession>`, sem setter, apoiada num campo privado
+`_sessions`. Configurei cada navegação com
+`.UsePropertyAccessMode(PropertyAccessMode.Field)`, dizendo ao EF Core pra
+ler/escrever direto no campo em vez de exigir um setter público — é o
+padrão oficial da documentação do EF Core pra trabalhar com Rich Domain
+Models sem abrir mão do encapsulamento.
+
+**Bug real que apareci e o porquê (vale a pena entender de verdade)**: ao
+testar `POST /events/{id}/sessions` contra o Postgres de verdade, recebi um
+`DbUpdateConcurrencyException` dizendo que um `UPDATE` afetou 0 linhas —
+mas a sessão era **nova**, deveria ter sido um `INSERT`.
+
+Causa: nossas entidades geram o próprio `Id` no construtor
+(`Guid.NewGuid()`, na classe base `Entity`). Quando o EF Core "descobre"
+uma entidade nova só através de uma navegação (`Event.Sessions` ganhou um
+item novo) — em vez de via `DbSet.Add()` explícito — ele usa uma heurística
+pra decidir se é um `INSERT` ou um `UPDATE`: *"essa chave primária já tem um
+valor diferente do padrão (`Guid.Empty`)? Então deve já existir no banco."*
+Como nossos GUIDs nunca são `Guid.Empty` (já nascem preenchidos), o EF
+Core sempre concluía errado que a entidade já existia.
+
+A correção: `builder.Property(e => e.Id).ValueGeneratedNever();` em cada
+configuração. Isso diz ao EF Core "eu nunca deleguei a geração desse Id pra
+você, então não tente adivinhar Added vs. Modified pelo valor — confie no
+que o change tracker já sabe". Depois disso, entidades descobertas via
+navegação passaram a ser corretamente tratadas como novas.
+
+**Por que esse bug é importante de entender**: é uma armadilha clássica e
+muito comum em qualquer projeto EF Core que usa GUIDs gerados no domínio
+(em vez de deixar o banco gerar via `gen_random_uuid()` ou similar) — e é
+exatamente o tipo de coisa que só aparece testando contra um banco real,
+nunca contra um repositório em memória. Isso também é uma ótima resposta
+pra dar numa entrevista técnica se perguntarem "já teve algum bug estranho
+com EF Core?".
+
+**Índice único como defesa em profundidade**: `Seat` ganhou um índice único
+em `(EventSessionId, Row, Number)`. A regra "não pode haver assento
+duplicado" já existe no domínio (`EventSession.AddSeat`), mas o índice
+garante que ela vale **mesmo que** algum código futuro escreva direto no
+banco (uma migração de dados, um script administrativo) e ignore o
+aggregate root. Defesa em camadas: a aplicação previne, o banco garante.
+
+**Migrations aplicadas automaticamente só em desenvolvimento**: o
+`Program.cs` chama `dbContext.Database.MigrateAsync()` na inicialização,
+mas só quando `Environment.IsDevelopment()`. Em produção, aplicar
+migrations automaticamente a cada deploy é arriscado (puxa o schema junto
+com o binário, sem controle explícito de quando/como) — o padrão correto
+seria um passo de release separado (`dotnet ef database update` num
+pipeline de CI/CD, antes de trocar a versão da API no ar).
+
+**Validado contra o banco real**: registro → login → refresh (com detecção
+de reuso de token revogado, `409`) → criar evento/sessão/assentos → reservar
+2 assentos → tentar reservar de novo o mesmo assento (`409`) → confirmar
+pedido → conferido também via `psql` direto que as linhas gravadas batem
+exatamente com o que a API retornou.
+
+---
+
 ## Próximas entradas neste documento
 
-- Fase 2 — PostgreSQL + EF Core (o que muda nos repositórios, migrations,
-  por que Scoped)
 - Fase 3 — Redis (lock distribuído, por que o problema do
   `ReservationService` só se resolve de verdade aqui)
 - Fase 4 — RabbitMQ (processamento assíncrono do pagamento)

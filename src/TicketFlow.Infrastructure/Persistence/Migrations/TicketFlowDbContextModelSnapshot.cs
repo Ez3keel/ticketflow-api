@@ -25,7 +25,6 @@ namespace TicketFlow.Infrastructure.Persistence.Migrations
             modelBuilder.Entity("TicketFlow.Domain.Entities.Event", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<string>("Description")
@@ -46,7 +45,6 @@ namespace TicketFlow.Infrastructure.Persistence.Migrations
             modelBuilder.Entity("TicketFlow.Domain.Entities.EventSession", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<Guid>("EventId")
@@ -74,7 +72,6 @@ namespace TicketFlow.Infrastructure.Persistence.Migrations
             modelBuilder.Entity("TicketFlow.Domain.Entities.Order", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<DateTime>("CreatedAtUtc")
@@ -99,7 +96,6 @@ namespace TicketFlow.Infrastructure.Persistence.Migrations
             modelBuilder.Entity("TicketFlow.Domain.Entities.OrderItem", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<Guid>("OrderId")
@@ -122,7 +118,6 @@ namespace TicketFlow.Infrastructure.Persistence.Migrations
             modelBuilder.Entity("TicketFlow.Domain.Entities.RefreshToken", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<DateTime>("ExpiresAtUtc")
@@ -151,7 +146,6 @@ namespace TicketFlow.Infrastructure.Persistence.Migrations
             modelBuilder.Entity("TicketFlow.Domain.Entities.Seat", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<Guid>("EventSessionId")
@@ -184,7 +178,6 @@ namespace TicketFlow.Infrastructure.Persistence.Migrations
             modelBuilder.Entity("TicketFlow.Domain.Entities.User", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<string>("Email")

@@ -10,6 +10,7 @@ public class SeatConfiguration : IEntityTypeConfiguration<Seat>
     {
         builder.ToTable("Seats");
         builder.HasKey(s => s.Id);
+        builder.Property(s => s.Id).ValueGeneratedNever();
 
         builder.Property(s => s.Row).IsRequired().HasMaxLength(5);
         builder.Property(s => s.Status).HasConversion<string>().HasMaxLength(20);
