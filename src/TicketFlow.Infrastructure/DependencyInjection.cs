@@ -1,8 +1,10 @@
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using TicketFlow.Application.Common.Interfaces;
 using TicketFlow.Infrastructure.Common;
-using TicketFlow.Infrastructure.Persistence.InMemory;
+using TicketFlow.Infrastructure.Persistence;
+using TicketFlow.Infrastructure.Persistence.Repositories;
 using TicketFlow.Infrastructure.Security;
 
 namespace TicketFlow.Infrastructure;
@@ -13,9 +15,15 @@ public static class DependencyInjection
     {
         services.Configure<JwtSettings>(configuration.GetSection(JwtSettings.SectionName));
 
-        services.AddSingleton<IEventRepository, InMemoryEventRepository>();
-        services.AddSingleton<IOrderRepository, InMemoryOrderRepository>();
-        services.AddSingleton<IUserRepository, InMemoryUserRepository>();
+        var connectionString = configuration.GetConnectionString("Postgres")
+            ?? throw new InvalidOperationException("ConnectionStrings:Postgres is missing.");
+
+        services.AddDbContext<TicketFlowDbContext>(options => options.UseNpgsql(connectionString));
+
+        services.AddScoped<IEventRepository, EfEventRepository>();
+        services.AddScoped<IOrderRepository, EfOrderRepository>();
+        services.AddScoped<IUserRepository, EfUserRepository>();
+        services.AddScoped<IUnitOfWork, EfUnitOfWork>();
 
         services.AddSingleton<IPasswordHasher, PasswordHasher>();
         services.AddSingleton<IJwtTokenGenerator, JwtTokenGenerator>();

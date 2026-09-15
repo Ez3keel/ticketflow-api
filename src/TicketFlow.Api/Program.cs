@@ -1,6 +1,7 @@
 using System.Text;
 using FluentValidation;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Scalar.AspNetCore;
 using Serilog;
@@ -8,6 +9,7 @@ using TicketFlow.Application.Auth;
 using TicketFlow.Application.Events;
 using TicketFlow.Application.Reservations;
 using TicketFlow.Infrastructure;
+using TicketFlow.Infrastructure.Persistence;
 using TicketFlow.Infrastructure.Security;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -76,6 +78,16 @@ builder.Services
 builder.Services.AddAuthorization();
 
 var app = builder.Build();
+
+if (app.Environment.IsDevelopment())
+{
+    // Convenient for local development so `docker compose up` + `dotnet run` is
+    // enough to get a working database; a real deployment would apply migrations
+    // as an explicit release step instead of on every app startup.
+    using var scope = app.Services.CreateScope();
+    var dbContext = scope.ServiceProvider.GetRequiredService<TicketFlowDbContext>();
+    await dbContext.Database.MigrateAsync();
+}
 
 app.UseSerilogRequestLogging();
 app.UseMiddleware<TicketFlow.Api.Middleware.ExceptionHandlingMiddleware>();
