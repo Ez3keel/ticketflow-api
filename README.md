@@ -3,8 +3,9 @@
 Backend de portfólio simulando uma plataforma de venda de ingressos de alto
 fluxo — o foco é resolver, de verdade, o problema de concorrência de
 "milhares de pessoas tentando comprar o mesmo assento ao mesmo tempo", com
-Clean Architecture, PostgreSQL/EF Core, Redis (lock distribuído + cache),
-RabbitMQ (confirmação assíncrona via worker), e (na próxima fase) SignalR.
+Clean Architecture, PostgreSQL/EF Core, Redis (lock distribuído, cache e
+backplane do SignalR), RabbitMQ (confirmação assíncrona via worker), e
+SignalR (mapa de assentos e confirmação de pedido em tempo real).
 
 O raciocínio por trás de cada decisão está documentado em
 [`docs/DECISOES-DE-ARQUITETURA.md`](docs/DECISOES-DE-ARQUITETURA.md) — vale
@@ -29,7 +30,9 @@ A API sobe em `http://localhost:5299` (ou na porta do seu
 `launchSettings.json`) e aplica as migrations do EF Core automaticamente em
 ambiente de desenvolvimento. Documentação interativa (Scalar) em
 `/scalar/v1`. Painel de administração do RabbitMQ em
-`http://localhost:15672` (usuário/senha: `guest`/`guest`).
+`http://localhost:15672` (usuário/senha: `guest`/`guest`). Hub do SignalR em
+`/hubs/ticketflow` (token JWT via query string `?access_token=...`, já que
+o handshake do WebSocket não permite header customizado).
 
 ## Testes
 
@@ -43,7 +46,7 @@ dotnet test
 src/
   TicketFlow.Domain          — entidades e regras de negócio, zero dependências externas
   TicketFlow.Application     — casos de uso, interfaces, DTOs, validação
-  TicketFlow.Infrastructure  — EF Core, Redis, RabbitMQ, JWT, hashing de senha
+  TicketFlow.Infrastructure  — EF Core, Redis, RabbitMQ, SignalR Hub, JWT, hashing de senha
   TicketFlow.Api              — controllers, autenticação, composição
   TicketFlow.Worker          — consome a fila de confirmação de pedidos
 tests/

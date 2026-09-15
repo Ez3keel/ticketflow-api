@@ -432,6 +432,93 @@ delay simulado de pagamento.
 
 ---
 
+## Fase 5 — SignalR (tempo real, via backplane no Redis)
+
+**O que foi feito**: dois tipos de notificação em tempo real, via
+WebSocket (`/hubs/ticketflow`):
+
+1. **`SeatStatusChanged`** — enviado pro grupo `session:{sessionId}` toda
+   vez que um assento muda de estado (`Reserved` na reserva, `Sold` na
+   confirmação, `Available` no cancelamento). Todo cliente olhando o mapa
+   de assentos daquela sessão recebe, sem precisar dar F5.
+2. **`OrderConfirmed`** — enviado só pro usuário dono do pedido, quando o
+   worker termina de confirmar a compra. Substitui o polling em
+   `GET /orders/{id}` que a Fase 4 deixou como única opção.
+
+**O problema que motivou reaproveitar o Redis pela terceira vez**: as
+conexões WebSocket de verdade só existem no processo da **API** (é lá que
+`MapHub<TicketFlowHub>()` roda). Mas quem confirma o pedido — e portanto
+quem sabe que precisa mandar `SeatStatusChanged: Sold` e `OrderConfirmed`
+— é o **worker**, que não tem, e não deveria ter, nenhuma conexão WebSocket
+própria. Sem alguma ponte entre os dois processos, o worker simplesmente
+não teria como "falar" com os clientes conectados na API.
+
+A solução padrão do SignalR pra isso é um **backplane**: todo servidor com
+Hub (aqui, só a API) se inscreve num canal do Redis via pub/sub; qualquer
+processo que tenha um `IHubContext<TicketFlowHub>` configurado com o mesmo
+backplane pode publicar nesse canal, mesmo sem hospedar conexão nenhuma —
+é exatamente esse "modo publicador-apenas" que o worker usa. Isso é
+literalmente para o que o backplane do SignalR foi desenhado (o caso de
+uso mais comum é múltiplas *instâncias da própria API* atrás de um load
+balancer se sincronizando), mas funciona igualmente bem entre dois
+processos com responsabilidades completamente diferentes — API e worker,
+nesse caso. É a **terceira** finalidade distinta que o Redis ganha neste
+projeto (lock distribuído na Fase 3, cache na Fase 3, backplane de pub/sub
+aqui), e cada uma delas resolve um problema diferente — vale a pena notar
+isso numa entrevista: "Redis" não é uma ferramenta de um truque só.
+
+**Por que `IRealtimeNotifier` é uma interface na `Application`** (e não os
+serviços chamando `IHubContext` diretamente): pelo mesmo motivo de sempre
+— `Application` não pode depender de um detalhe de infraestrutura como
+SignalR. Se um dia trocarmos WebSocket por outra tecnologia de push
+(Server-Sent Events, por exemplo), só a implementação em `Infrastructure`
+muda; `ReservationService` e `OrderProcessingService` continuam chamando
+`_realtimeNotifier.NotifySeatStatusChangedAsync(...)` sem saber nem se
+importar com o que está por trás.
+
+**`Clients.User()` exige um `IUserIdProvider` customizado**: o SignalR, por
+padrão, identifica o "usuário" de uma conexão pelo claim
+`ClaimTypes.NameIdentifier`. Como desde a Fase 1 configuramos
+`MapInboundClaims = false` no JWT (pra manter os nomes dos claims exatamente
+como emitidos, lembra do bug do `sub`?), o claim de identidade do usuário
+continua sendo literalmente `"sub"`. Sem um `IUserIdProvider` próprio lendo
+esse claim, `Clients.User(userId)` nunca encontraria a conexão de
+ninguém — mais uma consequência direta (e, dessa vez, esperada) daquela
+decisão da Fase 1.
+
+**Token JWT via query string, só pra rota do Hub**: navegadores não deixam
+adicionar um header `Authorization` customizado no handshake HTTP que
+inicia uma conexão WebSocket. A prática padrão (documentada pela própria
+Microsoft) é mandar o token como `?access_token=...` na URL de conexão, e
+capturá-lo de volta no pipeline de autenticação via
+`JwtBearerEvents.OnMessageReceived` — mas só quando o caminho da requisição
+começa com `/hubs`, pra não abrir uma segunda forma de autenticar endpoints
+REST normais (que continuam exigindo o header `Authorization` de sempre).
+
+**Validado na prática, de um jeito que prova exatamente o ponto**: escrevi
+um cliente SignalR descartável (`.NET`, fora do repositório, só pra esse
+teste), conectei ele na sessão, e disparei reserva + confirmação por HTTP
+enquanto ele escutava. A sequência de eventos recebida:
+
+```
+[EVENT] SeatStatusChanged: {"seatId":"...","status":"Reserved"}   <- publicado pela Api
+[EVENT] SeatStatusChanged: {"seatId":"...","status":"Sold"}        <- publicado pelo Worker
+[EVENT] OrderConfirmed:    {"orderId":"..."}                       <- publicado pelo Worker
+```
+
+As duas últimas mensagens vieram de um processo (`TicketFlow.Worker`) que
+nunca teve — e nunca terá — uma conexão WebSocket aberta com esse cliente.
+Isso só funciona por causa do backplane no Redis. Essa é a prova mais
+convincente que fiz até agora nesse projeto de que a arquitetura em
+camadas realmente compensa: a lógica de "avisar o cliente" foi escrita uma
+vez só (`IRealtimeNotifier`), e funciona igual não importa de qual
+processo ela é chamada.
+
+---
+
 ## Próximas entradas neste documento
 
-- Fase 5 — SignalR (mapa de assentos em tempo real)
+- Fase 6 — Rate limiting no endpoint de reserva
+- Fase 7 — Testes de concorrência de ponta a ponta (xUnit)
+- Fase 8 — Observabilidade (métricas + tracing distribuído)
+- Fase 9 — Empacotamento final (Docker Compose único, README com diagrama)

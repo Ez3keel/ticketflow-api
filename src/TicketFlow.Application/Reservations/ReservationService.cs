@@ -24,6 +24,7 @@ public class ReservationService
     private readonly IDistributedLockProvider _lockProvider;
     private readonly ICacheService _cache;
     private readonly IOrderQueue _orderQueue;
+    private readonly IRealtimeNotifier _realtimeNotifier;
 
     public ReservationService(
         IEventRepository eventRepository,
@@ -32,7 +33,8 @@ public class ReservationService
         IUnitOfWork unitOfWork,
         IDistributedLockProvider lockProvider,
         ICacheService cache,
-        IOrderQueue orderQueue)
+        IOrderQueue orderQueue,
+        IRealtimeNotifier realtimeNotifier)
     {
         _eventRepository = eventRepository;
         _orderRepository = orderRepository;
@@ -41,6 +43,7 @@ public class ReservationService
         _lockProvider = lockProvider;
         _cache = cache;
         _orderQueue = orderQueue;
+        _realtimeNotifier = realtimeNotifier;
     }
 
     public async Task<OrderDto> ReserveSeatsAsync(Guid userId, ReserveSeatsRequest request, CancellationToken cancellationToken = default)
@@ -92,6 +95,9 @@ public class ReservationService
             await _unitOfWork.SaveChangesAsync(cancellationToken);
             await _cache.RemoveAsync($"session:{session.Id}", cancellationToken);
 
+            foreach (var seat in seats)
+                await _realtimeNotifier.NotifySeatStatusChangedAsync(session.Id, seat.Id, seat.Status.ToString(), cancellationToken);
+
             return ToOrderDto(order);
         }
         finally
@@ -132,8 +138,11 @@ public class ReservationService
             ?? throw new NotFoundException($"Session {order.EventSessionId} was not found.");
 
         var session = @event.Sessions.First(s => s.Id == order.EventSessionId);
-        foreach (var item in order.Items)
-            session.Seats.First(s => s.Id == item.SeatId).Release();
+        var releasedSeats = order.Items
+            .Select(item => session.Seats.First(s => s.Id == item.SeatId))
+            .ToList();
+        foreach (var seat in releasedSeats)
+            seat.Release();
 
         order.Cancel();
 
@@ -141,6 +150,9 @@ public class ReservationService
         await _orderRepository.UpdateAsync(order, cancellationToken);
         await _unitOfWork.SaveChangesAsync(cancellationToken);
         await _cache.RemoveAsync($"session:{session.Id}", cancellationToken);
+
+        foreach (var seat in releasedSeats)
+            await _realtimeNotifier.NotifySeatStatusChangedAsync(session.Id, seat.Id, seat.Status.ToString(), cancellationToken);
 
         return ToOrderDto(order);
     }

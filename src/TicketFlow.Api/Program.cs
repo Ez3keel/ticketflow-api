@@ -10,6 +10,7 @@ using TicketFlow.Application.Events;
 using TicketFlow.Application.Reservations;
 using TicketFlow.Infrastructure;
 using TicketFlow.Infrastructure.Persistence;
+using TicketFlow.Infrastructure.Realtime;
 using TicketFlow.Infrastructure.Security;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -73,6 +74,22 @@ builder.Services
             ValidateLifetime = true,
             ClockSkew = TimeSpan.FromSeconds(30)
         };
+
+        // Browsers can't set an Authorization header on the WebSocket handshake
+        // SignalR uses, so the client sends the token as a query string parameter
+        // instead; this reads it back out for exactly that one path, leaving every
+        // other endpoint on the normal Authorization header.
+        options.Events = new JwtBearerEvents
+        {
+            OnMessageReceived = context =>
+            {
+                var accessToken = context.Request.Query["access_token"];
+                if (!string.IsNullOrEmpty(accessToken) && context.HttpContext.Request.Path.StartsWithSegments("/hubs"))
+                    context.Token = accessToken;
+
+                return Task.CompletedTask;
+            }
+        };
     });
 
 builder.Services.AddAuthorization();
@@ -108,5 +125,6 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
+app.MapHub<TicketFlowHub>("/hubs/ticketflow");
 
 app.Run();

@@ -13,17 +13,20 @@ public class OrderProcessingService
     private readonly IOrderRepository _orderRepository;
     private readonly IUnitOfWork _unitOfWork;
     private readonly ICacheService _cache;
+    private readonly IRealtimeNotifier _realtimeNotifier;
 
     public OrderProcessingService(
         IEventRepository eventRepository,
         IOrderRepository orderRepository,
         IUnitOfWork unitOfWork,
-        ICacheService cache)
+        ICacheService cache,
+        IRealtimeNotifier realtimeNotifier)
     {
         _eventRepository = eventRepository;
         _orderRepository = orderRepository;
         _unitOfWork = unitOfWork;
         _cache = cache;
+        _realtimeNotifier = realtimeNotifier;
     }
 
     public async Task ConfirmOrderAsync(Guid orderId, CancellationToken cancellationToken = default)
@@ -35,8 +38,11 @@ public class OrderProcessingService
             ?? throw new NotFoundException($"Session {order.EventSessionId} was not found.");
 
         var session = @event.Sessions.First(s => s.Id == order.EventSessionId);
-        foreach (var item in order.Items)
-            session.Seats.First(s => s.Id == item.SeatId).Confirm();
+        var confirmedSeats = order.Items
+            .Select(item => session.Seats.First(s => s.Id == item.SeatId))
+            .ToList();
+        foreach (var seat in confirmedSeats)
+            seat.Confirm();
 
         order.Confirm();
 
@@ -44,5 +50,14 @@ public class OrderProcessingService
         await _orderRepository.UpdateAsync(order, cancellationToken);
         await _unitOfWork.SaveChangesAsync(cancellationToken);
         await _cache.RemoveAsync($"session:{session.Id}", cancellationToken);
+
+        // This is the notification path that only works because of the Redis
+        // SignalR backplane: this code runs in the Worker process, which has no
+        // WebSocket connections of its own, yet both the group and the per-user
+        // message reach clients connected to the Api process.
+        foreach (var seat in confirmedSeats)
+            await _realtimeNotifier.NotifySeatStatusChangedAsync(session.Id, seat.Id, seat.Status.ToString(), cancellationToken);
+
+        await _realtimeNotifier.NotifyOrderConfirmedAsync(order.UserId, order.Id, cancellationToken);
     }
 }
