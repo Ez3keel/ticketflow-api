@@ -5,7 +5,8 @@ fluxo — o foco é resolver, de verdade, o problema de concorrência de
 "milhares de pessoas tentando comprar o mesmo assento ao mesmo tempo", com
 Clean Architecture, PostgreSQL/EF Core, Redis (lock distribuído, cache e
 backplane do SignalR), RabbitMQ (confirmação assíncrona via worker), e
-SignalR (mapa de assentos e confirmação de pedido em tempo real).
+SignalR (mapa de assentos e confirmação de pedido em tempo real), e rate
+limiting nos endpoints mais sensíveis a abuso.
 
 O raciocínio por trás de cada decisão está documentado em
 [`docs/DECISOES-DE-ARQUITETURA.md`](docs/DECISOES-DE-ARQUITETURA.md) — vale
@@ -33,6 +34,11 @@ ambiente de desenvolvimento. Documentação interativa (Scalar) em
 `http://localhost:15672` (usuário/senha: `guest`/`guest`). Hub do SignalR em
 `/hubs/ticketflow` (token JWT via query string `?access_token=...`, já que
 o handshake do WebSocket não permite header customizado).
+
+Limites de requisição: 100 req/min por IP (global), 5 req/min por IP em
+`/api/auth/register` e `/api/auth/login`, e 5 reservas por 10s por usuário
+em `/api/orders/reserve` (token bucket). Estourar o limite retorna `429`
+com header `Retry-After`.
 
 ## Testes
 

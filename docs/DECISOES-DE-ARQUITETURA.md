@@ -516,9 +516,65 @@ processo ela é chamada.
 
 ---
 
+## Fase 6 — Rate limiting
+
+**O que foi feito**: três políticas de limite de requisição, usando o
+middleware nativo do ASP.NET Core (`Microsoft.AspNetCore.RateLimiting`, sem
+pacote NuGet extra):
+
+1. **Global (fallback), por IP** — 100 requisições/minuto, aplicado a toda
+   rota que não tenha uma política mais específica. É uma rede de segurança
+   genérica, não a defesa principal.
+2. **`auth`, por IP** — 5 requisições/minuto em `POST /api/auth/register` e
+   `POST /api/auth/login`. Protege contra força bruta de senha e
+   *credential stuffing*.
+3. **`reserve`, por usuário** — token bucket com 5 tokens, recarregando 5 a
+   cada 10 segundos, em `POST /api/orders/reserve`. Essa é a política que
+   realmente importa pro domínio: é o endpoint que um bot tentando travar
+   todos os assentos de um show de propósito ia martelar.
+
+**Por que `reserve` é particionado por usuário e não por IP**: esse
+endpoint já exige `[Authorize]`, então particionar por `sub` (o claim do
+usuário no JWT) significa que trocar de IP não dá a um atacante nenhum
+token extra — ele precisaria de contas novas, o que já é uma barreira bem
+mais alta. Os endpoints de `auth`, por outro lado, particionam por IP
+porque é justamente ali que ainda **não existe** usuário autenticado — é o
+único identificador disponível nesse ponto.
+
+**Por que token bucket pro `reserve` e janela fixa pro resto**: uma janela
+fixa (*fixed window*) é mais simples de raciocinar, mas tem um problema
+conhecido nas bordas — alguém pode disparar o limite inteiro no último
+segundo de uma janela e o limite inteiro de novo no primeiro segundo da
+janela seguinte, efetivamente dobrando a taxa real por um instante. Pro
+`reserve`, onde a preocupação é especificamente um bot rajando pedidos,
+essa brecha importa mais. Token bucket evita isso ao recarregar
+continuamente (5 tokens a cada 10s) em vez de resetar tudo de uma vez —
+e ainda deixa uma pessoa legítima reservando ingressos pra vários amigos
+de uma vez fazer isso sem tropeçar no limite.
+
+**A pegadinha que confirmei testando**: o rate limiter roda **antes** do
+model binding / validação do FluentValidation — ele conta a requisição
+pelo simples fato de ter chegado no endpoint, não pelo que tem dentro do
+corpo. Descobri isso na prática: rodei um teste com payload malformado
+(um bug no meu próprio script de teste, não na API) e mesmo assim vi o
+padrão exato de "5 primeiras contam, as 3 seguintes tomam 429" — o que na
+verdade acabou sendo uma boa confirmação *independente* de que o contador
+do limitador funciona certo, já que nem chegou a importar se o corpo da
+requisição era válido. Depois repeti com payloads corretos e confirmei:
+5 reservas `200`, as 3 seguintes `429`.
+
+**Corpo da resposta e `Retry-After`**: assim como o
+`ExceptionHandlingMiddleware` da Fase 1, um `429` vem com corpo
+`application/problem+json` consistente com o resto da API, mais o header
+`Retry-After` (em segundos) — pra quem está automatizando o consumo da API
+saber exatamente quanto esperar antes de tentar de novo, em vez de ficar
+adivinhando ou tentando imediatamente (o que só faria o backoff exponencial
+de um cliente bem-comportado demorar mais pra convergir).
+
+---
+
 ## Próximas entradas neste documento
 
-- Fase 6 — Rate limiting no endpoint de reserva
 - Fase 7 — Testes de concorrência de ponta a ponta (xUnit)
 - Fase 8 — Observabilidade (métricas + tracing distribuído)
 - Fase 9 — Empacotamento final (Docker Compose único, README com diagrama)

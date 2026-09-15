@@ -1,6 +1,8 @@
 using FluentValidation;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using TicketFlow.Api.Common;
+using TicketFlow.Api.RateLimiting;
 using TicketFlow.Application.Auth;
 using TicketFlow.Application.Auth.Dtos;
 
@@ -25,6 +27,7 @@ public class AuthController : ControllerBase
     }
 
     [HttpPost("register")]
+    [EnableRateLimiting(RateLimitingPolicies.Auth)]
     public async Task<ActionResult<AuthResponse>> Register(RegisterRequest request, CancellationToken cancellationToken)
     {
         var validation = await _registerValidator.ValidateAsync(request, cancellationToken);
@@ -36,6 +39,7 @@ public class AuthController : ControllerBase
     }
 
     [HttpPost("login")]
+    [EnableRateLimiting(RateLimitingPolicies.Auth)]
     public async Task<ActionResult<AuthResponse>> Login(LoginRequest request, CancellationToken cancellationToken)
     {
         var validation = await _loginValidator.ValidateAsync(request, cancellationToken);

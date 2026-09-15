@@ -1,10 +1,13 @@
 using System.Text;
+using System.Threading.RateLimiting;
 using FluentValidation;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Scalar.AspNetCore;
 using Serilog;
+using TicketFlow.Api.RateLimiting;
 using TicketFlow.Application.Auth;
 using TicketFlow.Application.Events;
 using TicketFlow.Application.Reservations;
@@ -94,6 +97,75 @@ builder.Services
 
 builder.Services.AddAuthorization();
 
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+    // Baseline abuse protection for every endpoint, partitioned by client IP since
+    // most of the catalog is publicly readable without a token. Deliberately
+    // generous (100 req/min) -- this is a safety net, not the real defense.
+    options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: ClientIp(httpContext),
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                Window = TimeSpan.FromMinutes(1),
+                PermitLimit = 100,
+                QueueLimit = 0
+            }));
+
+    // The real defense: seat reservation is the one endpoint a bot actually wants
+    // to hammer (grab every seat before a human can). Partitioned per user (not
+    // IP) since it's already [Authorize]-only, so one account can't just rotate
+    // IPs to get more attempts. A token bucket allows a small legitimate burst
+    // (reserving a few seats for friends) while capping the sustained rate.
+    // AddPolicy (not AddTokenBucketLimiter) is what makes this per-partition-key --
+    // the simpler AddXxxLimiter overloads create a single limiter shared by every
+    // caller, which would rate-limit the whole endpoint globally instead of per user.
+    options.AddPolicy<string>(RateLimitingPolicies.Reserve, httpContext =>
+        RateLimitPartition.GetTokenBucketLimiter(
+            partitionKey: UserId(httpContext),
+            factory: _ => new TokenBucketRateLimiterOptions
+            {
+                TokenLimit = 5,
+                TokensPerPeriod = 5,
+                ReplenishmentPeriod = TimeSpan.FromSeconds(10),
+                QueueLimit = 0,
+                AutoReplenishment = true
+            }));
+
+    // Brute-force / credential-stuffing protection on login and registration,
+    // partitioned by IP since there's no authenticated user yet at this point.
+    options.AddPolicy<string>(RateLimitingPolicies.Auth, httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: ClientIp(httpContext),
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                Window = TimeSpan.FromMinutes(1),
+                PermitLimit = 5,
+                QueueLimit = 0
+            }));
+
+    options.OnRejected = async (context, cancellationToken) =>
+    {
+        if (context.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter))
+            context.HttpContext.Response.Headers.RetryAfter = ((int)retryAfter.TotalSeconds).ToString();
+
+        context.HttpContext.Response.ContentType = "application/problem+json";
+        await context.HttpContext.Response.WriteAsJsonAsync(new
+        {
+            status = StatusCodes.Status429TooManyRequests,
+            title = "TooManyRequests",
+            detail = "Rate limit exceeded. Please slow down and try again shortly."
+        }, cancellationToken);
+    };
+});
+
+static string ClientIp(HttpContext httpContext) => httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+
+static string UserId(HttpContext httpContext)
+    => httpContext.User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value ?? ClientIp(httpContext);
+
 var app = builder.Build();
 
 if (app.Environment.IsDevelopment())
@@ -123,6 +195,7 @@ app.UseHttpsRedirection();
 
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseRateLimiter();
 
 app.MapControllers();
 app.MapHub<TicketFlowHub>("/hubs/ticketflow");

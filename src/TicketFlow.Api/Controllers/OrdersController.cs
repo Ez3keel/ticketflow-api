@@ -1,7 +1,9 @@
 using FluentValidation;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using TicketFlow.Api.Common;
+using TicketFlow.Api.RateLimiting;
 using TicketFlow.Application.Reservations;
 using TicketFlow.Application.Reservations.Dtos;
 
@@ -22,6 +24,7 @@ public class OrdersController : ControllerBase
     }
 
     [HttpPost("reserve")]
+    [EnableRateLimiting(RateLimitingPolicies.Reserve)]
     public async Task<ActionResult<OrderDto>> Reserve(ReserveSeatsRequest request, CancellationToken cancellationToken)
     {
         var validation = await _reserveValidator.ValidateAsync(request, cancellationToken);
