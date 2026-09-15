@@ -4,6 +4,7 @@
     <Project Path="src/TicketFlow.Application/TicketFlow.Application.csproj" />
     <Project Path="src/TicketFlow.Domain/TicketFlow.Domain.csproj" />
     <Project Path="src/TicketFlow.Infrastructure/TicketFlow.Infrastructure.csproj" />
+    <Project Path="src/TicketFlow.Worker/TicketFlow.Worker.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/TicketFlow.Domain.Tests/TicketFlow.Domain.Tests.csproj" />

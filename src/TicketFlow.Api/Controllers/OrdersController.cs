@@ -32,9 +32,19 @@ public class OrdersController : ControllerBase
         return Ok(order);
     }
 
+    [HttpGet("{orderId:guid}")]
+    public async Task<ActionResult<OrderDto>> Get(Guid orderId, CancellationToken cancellationToken)
+        => Ok(await _reservationService.GetOrderAsync(User.GetUserId(), orderId, cancellationToken));
+
+    // Returns 202: the order is only marked Processing here. A worker consuming
+    // RabbitMQ does the actual confirmation (simulated payment + seats -> Sold +
+    // order -> Confirmed) asynchronously -- poll GET /orders/{id} to see it land.
     [HttpPost("{orderId:guid}/confirm")]
     public async Task<ActionResult<OrderDto>> Confirm(Guid orderId, CancellationToken cancellationToken)
-        => Ok(await _reservationService.ConfirmOrderAsync(User.GetUserId(), orderId, cancellationToken));
+    {
+        var order = await _reservationService.RequestConfirmationAsync(User.GetUserId(), orderId, cancellationToken);
+        return Accepted(order);
+    }
 
     [HttpPost("{orderId:guid}/cancel")]
     public async Task<ActionResult<OrderDto>> Cancel(Guid orderId, CancellationToken cancellationToken)

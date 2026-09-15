@@ -23,6 +23,7 @@ public class ReservationService
     private readonly IUnitOfWork _unitOfWork;
     private readonly IDistributedLockProvider _lockProvider;
     private readonly ICacheService _cache;
+    private readonly IOrderQueue _orderQueue;
 
     public ReservationService(
         IEventRepository eventRepository,
@@ -30,7 +31,8 @@ public class ReservationService
         IDateTimeProvider dateTimeProvider,
         IUnitOfWork unitOfWork,
         IDistributedLockProvider lockProvider,
-        ICacheService cache)
+        ICacheService cache,
+        IOrderQueue orderQueue)
     {
         _eventRepository = eventRepository;
         _orderRepository = orderRepository;
@@ -38,6 +40,7 @@ public class ReservationService
         _unitOfWork = unitOfWork;
         _lockProvider = lockProvider;
         _cache = cache;
+        _orderQueue = orderQueue;
     }
 
     public async Task<OrderDto> ReserveSeatsAsync(Guid userId, ReserveSeatsRequest request, CancellationToken cancellationToken = default)
@@ -98,23 +101,27 @@ public class ReservationService
         }
     }
 
-    public async Task<OrderDto> ConfirmOrderAsync(Guid userId, Guid orderId, CancellationToken cancellationToken = default)
+    // Doesn't confirm anything itself -- it hands the order to OrderProcessingService
+    // via the queue, which is what actually flips seats to Sold and the order to
+    // Confirmed. Keeping this request/response fast is the whole point: the caller
+    // gets an immediate "your payment is processing" instead of waiting on whatever
+    // the (simulated) payment step ends up costing.
+    public async Task<OrderDto> RequestConfirmationAsync(Guid userId, Guid orderId, CancellationToken cancellationToken = default)
     {
         var order = await GetOwnedOrderAsync(userId, orderId, cancellationToken);
-        var @event = await _eventRepository.GetBySessionIdAsync(order.EventSessionId, cancellationToken)
-            ?? throw new NotFoundException($"Session {order.EventSessionId} was not found.");
 
-        var session = @event.Sessions.First(s => s.Id == order.EventSessionId);
-        foreach (var item in order.Items)
-            session.Seats.First(s => s.Id == item.SeatId).Confirm();
+        order.MarkAsProcessing();
 
-        order.Confirm();
-
-        await _eventRepository.UpdateAsync(@event, cancellationToken);
         await _orderRepository.UpdateAsync(order, cancellationToken);
         await _unitOfWork.SaveChangesAsync(cancellationToken);
-        await _cache.RemoveAsync($"session:{session.Id}", cancellationToken);
+        await _orderQueue.EnqueueConfirmationAsync(order.Id, cancellationToken);
 
+        return ToOrderDto(order);
+    }
+
+    public async Task<OrderDto> GetOrderAsync(Guid userId, Guid orderId, CancellationToken cancellationToken = default)
+    {
+        var order = await GetOwnedOrderAsync(userId, orderId, cancellationToken);
         return ToOrderDto(order);
     }
 

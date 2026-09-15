@@ -346,7 +346,92 @@ invalidação confirmada via `redis-cli` logo após um `confirm`.
 
 ---
 
+## Fase 4 — RabbitMQ (confirmação assíncrona via worker)
+
+**O que foi feito**: `POST /orders/{id}/confirm` não confirma mais nada
+diretamente. Ele só marca o pedido como `Processing` e publica uma
+mensagem `{ OrderId }` na fila `order-confirmations`, respondendo
+`202 Accepted` em ~180ms. Um **processo separado**
+(`TicketFlow.Worker`, um `BackgroundService` do .NET, não um endpoint da
+API) consome essa fila, simula 2 segundos de processamento de pagamento, e
+só então executa a confirmação de verdade (assentos → `Sold`, pedido →
+`Confirmed`). O cliente descobre que a compra foi confirmada fazendo
+`GET /orders/{id}` — implementado nesta fase também, já que antes não
+existia um jeito de consultar um pedido isoladamente.
+
+**Por que um novo estado `Processing` no domínio**: sem ele, "confirmar"
+teria que pular direto de `PendingPayment` para `Confirmed`, e não haveria
+como representar "a confirmação foi pedida, mas ainda não aconteceu" — nem
+como impedir alguém de clicar "confirmar" duas vezes e publicar duas
+mensagens pra fila do mesmo pedido (a segunda tentativa de
+`MarkAsProcessing()` falha porque o pedido já não está mais
+`PendingPayment`). O estado extra também deixa o fluxo auditável: dá pra
+ver, pelo histórico, que um pedido ficou "em processamento" por X segundos
+antes de confirmar.
+
+**Por que isso é um projeto .NET separado (`TicketFlow.Worker`), não um
+`BackgroundService` dentro da própria API**: a API e o worker têm perfis de
+carga completamente diferentes — a API precisa responder rápido a picos de
+tráfego HTTP, o worker precisa processar mensagens de forma constante e
+previsível. Sendo processos separados, cada um escala independentemente
+(mais instâncias da API não significa mais processamento de fila, e
+vice-versa) e um consegue cair sem derrubar o outro. Ambos reutilizam a
+mesma `TicketFlow.Infrastructure` e `TicketFlow.Application` — é o mesmo
+`AddInfrastructure()` de sempre, só que chamado a partir de um
+`Host.CreateApplicationBuilder` (worker genérico) em vez de um
+`WebApplication.CreateBuilder` (API web).
+
+**Por que existem dois "serviços de confirmação" separados**
+(`ReservationService.RequestConfirmationAsync` vs.
+`OrderProcessingService.ConfirmOrderAsync`) em vez de um método só: eles
+têm autorização e gatilhos completamente diferentes. O primeiro é chamado
+por um usuário autenticado, via HTTP, e só pode agir sobre o **próprio**
+pedido. O segundo é chamado só pelo worker, a partir de uma mensagem que já
+passou pela fila — não faz sentido (nem seria seguro) expor esse método
+como endpoint HTTP, e não faz sentido o worker precisar simular um
+`userId` pra chamar um método pensado pra validar propriedade de recurso
+via HTTP.
+
+**Fila simples (default exchange) em vez de exchange dedicada**: usei o
+padrão mais básico do RabbitMQ — publicar direto pra uma fila nomeada via
+exchange padrão (`""`) — porque só existe **um** tipo de consumidor
+interessado nessa mensagem (o worker de confirmação). Uma exchange
+`topic`/`fanout` só ganharia sentido se, no futuro, mais de um serviço
+precisasse reagir ao mesmo evento (por exemplo, um serviço de e-mail
+enviando a confirmação por fora do worker principal) — nesse caso o
+roteamento por exchange faria diferença. Introduzir isso agora seria
+complexidade sem propósito imediato.
+
+**`BasicQos(prefetchCount: 1)`**: sem isso, o RabbitMQ empurraria todas as
+mensagens pendentes pro worker de uma vez, mesmo que ele só processe uma
+por vez — isso quebraria o equilíbrio de carga se você rodasse várias
+instâncias do worker (uma instância acumularia um monte de mensagens
+enquanto outra ficaria ociosa). Com `prefetchCount: 1`, cada worker só
+recebe uma mensagem nova depois de confirmar (`ack`) a anterior.
+
+**O que acontece se o processamento falhar**: a mensagem é rejeitada com
+`requeue: false` (descartada). Documentei no código que isso é uma
+simplificação deliberada — o correto em produção seria configurar uma
+*dead-letter exchange*, pra mensagens com falha caírem numa fila separada
+onde um humano (ou um processo de retry) possa investigar, em vez de
+simplesmente desaparecerem.
+
+**Validado na prática**: cheguei a rodar dois processos do worker ao mesmo
+tempo sem perceber (sobra de um teste anterior) — o RabbitMQ, corretamente,
+distribuiu mensagens entre os dois, e como eu só olhava o log de um deles,
+pareceu que uma confirmação tinha "sumido". Conferir
+`rabbitmqctl list_queues name messages consumers` mostrou 2 consumidores
+na fila quando eu esperava 1 — foi assim que achei o processo duplicado.
+Isso não chegou a ser um bug de código, mas foi um lembrete de que "quantas
+instâncias do consumidor estão rodando" é um detalhe operacional real que
+vale a pena verificar, não só assumir. Depois de matar o processo
+duplicado, confirmei o comportamento esperado: `202` imediato com status
+`Processing`, status continua `Processing` logo em seguida, e só vira
+`Confirmed` (assento incluso, verificado direto no Postgres) depois do
+delay simulado de pagamento.
+
+---
+
 ## Próximas entradas neste documento
 
-- Fase 4 — RabbitMQ (processamento assíncrono do pagamento)
 - Fase 5 — SignalR (mapa de assentos em tempo real)

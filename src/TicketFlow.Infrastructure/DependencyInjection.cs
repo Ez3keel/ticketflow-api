@@ -1,10 +1,12 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using RabbitMQ.Client;
 using StackExchange.Redis;
 using TicketFlow.Application.Common.Interfaces;
 using TicketFlow.Infrastructure.Caching;
 using TicketFlow.Infrastructure.Common;
+using TicketFlow.Infrastructure.Messaging;
 using TicketFlow.Infrastructure.Persistence;
 using TicketFlow.Infrastructure.Persistence.Repositories;
 using TicketFlow.Infrastructure.Security;
@@ -28,6 +30,21 @@ public static class DependencyInjection
         services.AddSingleton<IConnectionMultiplexer>(_ => ConnectionMultiplexer.Connect(redisConnectionString));
         services.AddSingleton<IDistributedLockProvider, RedisDistributedLockProvider>();
         services.AddSingleton<ICacheService, RedisCacheService>();
+
+        services.Configure<RabbitMqSettings>(configuration.GetSection(RabbitMqSettings.SectionName));
+        services.AddSingleton<IConnection>(sp =>
+        {
+            var settings = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<RabbitMqSettings>>().Value;
+            var factory = new ConnectionFactory
+            {
+                HostName = settings.HostName,
+                Port = settings.Port,
+                UserName = settings.UserName,
+                Password = settings.Password
+            };
+            return factory.CreateConnectionAsync().GetAwaiter().GetResult();
+        });
+        services.AddSingleton<IOrderQueue, RabbitMqOrderQueue>();
 
         services.AddScoped<IEventRepository, EfEventRepository>();
         services.AddScoped<IOrderRepository, EfOrderRepository>();
