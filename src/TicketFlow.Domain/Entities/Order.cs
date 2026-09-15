@@ -37,12 +37,20 @@ public class Order : Entity
         _items.Add(new OrderItem(Id, seatId, price));
     }
 
-    public void Confirm()
+    public void MarkAsProcessing()
     {
         if (Status != OrderStatus.PendingPayment)
-            throw new DomainException($"Order cannot be confirmed from status {Status}.");
+            throw new DomainException($"Order cannot start processing from status {Status}.");
         if (_items.Count == 0)
-            throw new DomainException("Cannot confirm an order with no items.");
+            throw new DomainException("Cannot process an order with no items.");
+
+        Status = OrderStatus.Processing;
+    }
+
+    public void Confirm()
+    {
+        if (Status != OrderStatus.Processing)
+            throw new DomainException($"Order cannot be confirmed from status {Status}.");
 
         Status = OrderStatus.Confirmed;
     }

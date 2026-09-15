@@ -40,18 +40,49 @@ public class OrderTests
     }
 
     [Fact]
-    public void Confirm_WithNoItems_Throws()
+    public void MarkAsProcessing_WithNoItems_Throws()
     {
         var order = new Order(Guid.NewGuid(), Guid.NewGuid(), DateTime.UtcNow);
+
+        Assert.Throws<DomainException>(() => order.MarkAsProcessing());
+    }
+
+    [Fact]
+    public void MarkAsProcessing_WithItems_SetsProcessing()
+    {
+        var order = new Order(Guid.NewGuid(), Guid.NewGuid(), DateTime.UtcNow);
+        order.AddItem(Guid.NewGuid(), 150m);
+
+        order.MarkAsProcessing();
+
+        Assert.Equal(OrderStatus.Processing, order.Status);
+    }
+
+    [Fact]
+    public void MarkAsProcessing_WhenAlreadyProcessing_Throws()
+    {
+        var order = new Order(Guid.NewGuid(), Guid.NewGuid(), DateTime.UtcNow);
+        order.AddItem(Guid.NewGuid(), 150m);
+        order.MarkAsProcessing();
+
+        Assert.Throws<DomainException>(() => order.MarkAsProcessing());
+    }
+
+    [Fact]
+    public void Confirm_BeforeProcessing_Throws()
+    {
+        var order = new Order(Guid.NewGuid(), Guid.NewGuid(), DateTime.UtcNow);
+        order.AddItem(Guid.NewGuid(), 150m);
 
         Assert.Throws<DomainException>(() => order.Confirm());
     }
 
     [Fact]
-    public void Confirm_WithItems_SetsConfirmed()
+    public void Confirm_AfterProcessing_SetsConfirmed()
     {
         var order = new Order(Guid.NewGuid(), Guid.NewGuid(), DateTime.UtcNow);
         order.AddItem(Guid.NewGuid(), 150m);
+        order.MarkAsProcessing();
 
         order.Confirm();
 
@@ -59,11 +90,11 @@ public class OrderTests
     }
 
     [Fact]
-    public void AddItem_AfterConfirm_Throws()
+    public void AddItem_AfterMarkAsProcessing_Throws()
     {
         var order = new Order(Guid.NewGuid(), Guid.NewGuid(), DateTime.UtcNow);
         order.AddItem(Guid.NewGuid(), 150m);
-        order.Confirm();
+        order.MarkAsProcessing();
 
         Assert.Throws<DomainException>(() => order.AddItem(Guid.NewGuid(), 150m));
     }
@@ -79,10 +110,21 @@ public class OrderTests
     }
 
     [Fact]
+    public void Cancel_WhileProcessing_Throws()
+    {
+        var order = new Order(Guid.NewGuid(), Guid.NewGuid(), DateTime.UtcNow);
+        order.AddItem(Guid.NewGuid(), 150m);
+        order.MarkAsProcessing();
+
+        Assert.Throws<DomainException>(() => order.Cancel());
+    }
+
+    [Fact]
     public void Cancel_AfterConfirm_Throws()
     {
         var order = new Order(Guid.NewGuid(), Guid.NewGuid(), DateTime.UtcNow);
         order.AddItem(Guid.NewGuid(), 150m);
+        order.MarkAsProcessing();
         order.Confirm();
 
         Assert.Throws<DomainException>(() => order.Cancel());
