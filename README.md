@@ -3,8 +3,8 @@
 Backend de portfólio simulando uma plataforma de venda de ingressos de alto
 fluxo — o foco é resolver, de verdade, o problema de concorrência de
 "milhares de pessoas tentando comprar o mesmo assento ao mesmo tempo", com
-Clean Architecture, PostgreSQL/EF Core, e (nas próximas fases) Redis,
-RabbitMQ e SignalR.
+Clean Architecture, PostgreSQL/EF Core, Redis (lock distribuído + cache), e
+(nas próximas fases) RabbitMQ e SignalR.
 
 O raciocínio por trás de cada decisão está documentado em
 [`docs/DECISOES-DE-ARQUITETURA.md`](docs/DECISOES-DE-ARQUITETURA.md) — vale
@@ -15,7 +15,7 @@ a leitura antes de mexer no código.
 Pré-requisitos: .NET 8 SDK, Docker Desktop.
 
 ```bash
-docker compose up -d postgres
+docker compose up -d postgres redis
 dotnet run --project src/TicketFlow.Api
 ```
 
@@ -36,7 +36,7 @@ dotnet test
 src/
   TicketFlow.Domain          — entidades e regras de negócio, zero dependências externas
   TicketFlow.Application     — casos de uso, interfaces, DTOs, validação
-  TicketFlow.Infrastructure  — EF Core, JWT, hashing de senha
+  TicketFlow.Infrastructure  — EF Core, Redis, JWT, hashing de senha
   TicketFlow.Api             — controllers, autenticação, composição
 tests/
   TicketFlow.Domain.Tests    — testes xUnit das regras de domínio

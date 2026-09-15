@@ -7,13 +7,17 @@ namespace TicketFlow.Application.Events;
 
 public class EventCatalogService
 {
+    private static readonly TimeSpan SessionCacheTtl = TimeSpan.FromSeconds(30);
+
     private readonly IEventRepository _eventRepository;
     private readonly IUnitOfWork _unitOfWork;
+    private readonly ICacheService _cache;
 
-    public EventCatalogService(IEventRepository eventRepository, IUnitOfWork unitOfWork)
+    public EventCatalogService(IEventRepository eventRepository, IUnitOfWork unitOfWork, ICacheService cache)
     {
         _eventRepository = eventRepository;
         _unitOfWork = unitOfWork;
+        _cache = cache;
     }
 
     public async Task<EventDto> CreateEventAsync(CreateEventRequest request, CancellationToken cancellationToken = default)
@@ -53,17 +57,31 @@ public class EventCatalogService
 
         await _eventRepository.UpdateAsync(@event, cancellationToken);
         await _unitOfWork.SaveChangesAsync(cancellationToken);
+        await _cache.RemoveAsync($"session:{sessionId}", cancellationToken);
 
         return ToSessionDetailDto(session);
     }
 
     public async Task<EventSessionDetailDto> GetSessionAsync(Guid sessionId, CancellationToken cancellationToken = default)
     {
+        var cacheKey = $"session:{sessionId}";
+        var cached = await _cache.GetAsync<EventSessionDetailDto>(cacheKey, cancellationToken);
+        if (cached is not null)
+            return cached;
+
         var @event = await _eventRepository.GetBySessionIdAsync(sessionId, cancellationToken)
             ?? throw new NotFoundException($"Session {sessionId} was not found.");
 
         var session = @event.Sessions.First(s => s.Id == sessionId);
-        return ToSessionDetailDto(session);
+        var dto = ToSessionDetailDto(session);
+
+        // TTL is a safety net, not the primary consistency mechanism -- every write
+        // path that touches this session's seats (AddSeats, reserve, confirm,
+        // cancel) explicitly removes this key already. If one of those ever misses
+        // an invalidation, the entry still self-corrects within 30s instead of
+        // serving stale seat statuses indefinitely.
+        await _cache.SetAsync(cacheKey, dto, SessionCacheTtl, cancellationToken);
+        return dto;
     }
 
     private static EventDto ToEventDto(Event @event) => new(

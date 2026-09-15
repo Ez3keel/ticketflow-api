@@ -267,9 +267,86 @@ exatamente com o que a API retornou.
 
 ---
 
+## Fase 3 — Redis (lock distribuído + cache)
+
+**O que foi feito**: duas coisas separadas, com propósitos bem diferentes:
+
+1. **Lock distribuído** (`IDistributedLockProvider` / `RedisDistributedLockProvider`)
+   pra proteger a janela "checar disponibilidade → reservar" do
+   `ReservationService` — o ponto exato que o comentário desde a Fase 1
+   já avisava que só era seguro dentro de um processo só.
+2. **Cache-aside** (`ICacheService` / `RedisCacheService`) no
+   `GET /events/sessions/{id}` — o mapa de assentos é lido com muito mais
+   frequência do que é escrito (todo mundo olhando o show, poucos
+   comprando), então é um candidato natural a cache.
+
+**Por que o problema anterior era real e não só teórico**: com EF Core, o
+`ReservationService` carregava o assento, checava `Status == Available`, e
+chamava `seat.Reserve()` — tudo dentro do mesmo `DbContext`. Sem nenhuma
+trava, duas requisições concorrentes (em duas instâncias da API, ou até na
+mesma, dependendo do timing) podiam **as duas** carregar o assento como
+`Available`, **as duas** passarem na validação, e **as duas** chamarem
+`SaveChanges()` — a segunda simplesmente sobrescrevia a primeira, porque a
+coluna `Status` não tem controle de concorrência otimista. Ou seja: sem
+Redis, o sistema venderia o mesmo assento duas vezes **silenciosamente**,
+sem nenhum erro. Provei isso na prática disparando 15 requisições paralelas
+tentando reservar o mesmo assento: com o lock, exatamente 1 teve sucesso e
+14 caíram em `409` — sem o lock (é só remover a seção de
+`_lockProvider.TryAcquireAsync` mentalmente) esse mesmo teste teria dado
+mais de um "sucesso".
+
+**Por que a trava é por assento, não por sessão inteira**: travar a sessão
+inteira (`session-lock:{sessionId}`) seria mais simples de implementar, mas
+serializaria **todas** as compras daquele show — ninguém mais conseguiria
+comprar enquanto uma pessoa está no meio de uma compra, mesmo que sejam
+assentos completamente diferentes. Travando por assento individual, duas
+pessoas comprando assentos diferentes do mesmo show continuam em paralelo;
+só quem disputa o **mesmo** assento é serializado.
+
+**Por que os locks são adquiridos em ordem (`OrderBy(s => s.Id)`)**:
+imagine duas compras concorrentes, uma pedindo assentos `[A, B]` e outra
+pedindo `[B, A]`. Sem ordenar, a primeira poderia travar `A` e esperar por
+`B`, enquanto a segunda trava `B` e espera por `A` — *deadlock*. Ordenando
+os IDs antes de adquirir os locks, as duas requisições sempre tentam travar
+na mesma sequência, então uma delas sempre consegue progredir.
+
+**Por que o TTL do lock é curto (5s) enquanto a reserva em si dura 10
+minutos**: são coisas diferentes. O lock do Redis só precisa sobreviver ao
+tempo de ida-e-volta ao banco (milissegundos, poucos segundos no pior
+caso) — ele existe só pra proteger a operação de "ler e escrever" contra
+concorrência. O "esse assento está reservado por 10 minutos" é um fato de
+negócio, e por isso vive **duravelmente no Postgres**
+(`Seat.ReservedUntil`), não no Redis. Se o Redis reiniciasse agora, nenhuma
+reserva em andamento seria perdida — só o lock efêmero da operação que
+talvez estivesse no meio.
+
+**Por que `ReloadSeatsAsync` é necessário**: os assentos são carregados do
+banco **antes** de conseguirmos o lock (precisamos deles pra saber os IDs a
+travar). Isso significa que, entre o carregamento e a garantia do lock,
+outra requisição pode ter reservado esse mesmo assento e já ter dado
+commit. O EF Core, por padrão, nunca re-consulta o banco pra uma entidade
+que já está sendo rastreada na mesma sessão do `DbContext` (o "mapa de
+identidade") — então, sem forçar um `ReloadAsync` depois de garantir o
+lock, a checagem de disponibilidade estaria olhando pra uma cópia
+potencialmente desatualizada em memória, mesmo com o lock em mãos.
+
+**Por que o cache usa invalidação explícita e não só TTL**: toda escrita
+que muda o estado dos assentos de uma sessão (`AddSeatsAsync`,
+`ReserveSeatsAsync`, `ConfirmOrderAsync`, `CancelOrderAsync`) remove a
+chave do cache explicitamente. O TTL de 30s existe só como rede de
+segurança — se algum caminho de escrita futuro esquecer de invalidar, o
+dado errado no máximo fica visível por até 30 segundos, não indefinidamente.
+Confirmei isso na prática: depois de confirmar um pedido, a chave
+`session:{id}` já não existia mais no Redis (`EXISTS` retornou `0`), antes
+mesmo do TTL vencer.
+
+**Validado na prática**: 15 requisições paralelas pro mesmo assento → 1
+sucesso, 14 `409`; cache populado com TTL de 30s no primeiro `GET`;
+invalidação confirmada via `redis-cli` logo após um `confirm`.
+
+---
+
 ## Próximas entradas neste documento
 
-- Fase 3 — Redis (lock distribuído, por que o problema do
-  `ReservationService` só se resolve de verdade aqui)
 - Fase 4 — RabbitMQ (processamento assíncrono do pagamento)
 - Fase 5 — SignalR (mapa de assentos em tempo real)

@@ -10,21 +10,34 @@ public class ReservationService
 {
     private static readonly TimeSpan HoldDuration = TimeSpan.FromMinutes(10);
 
+    // Only needs to outlive the check-then-reserve round trip to the database (a few
+    // hundred ms at most), not the 10-minute hold itself -- that's durably recorded
+    // in Postgres via Seat.ReservedUntil once this lock is released. If this
+    // instance crashed mid-operation, the lock self-expires instead of jamming the
+    // seat for other requests indefinitely.
+    private static readonly TimeSpan SeatLockDuration = TimeSpan.FromSeconds(5);
+
     private readonly IEventRepository _eventRepository;
     private readonly IOrderRepository _orderRepository;
     private readonly IDateTimeProvider _dateTimeProvider;
     private readonly IUnitOfWork _unitOfWork;
+    private readonly IDistributedLockProvider _lockProvider;
+    private readonly ICacheService _cache;
 
     public ReservationService(
         IEventRepository eventRepository,
         IOrderRepository orderRepository,
         IDateTimeProvider dateTimeProvider,
-        IUnitOfWork unitOfWork)
+        IUnitOfWork unitOfWork,
+        IDistributedLockProvider lockProvider,
+        ICacheService cache)
     {
         _eventRepository = eventRepository;
         _orderRepository = orderRepository;
         _dateTimeProvider = dateTimeProvider;
         _unitOfWork = unitOfWork;
+        _lockProvider = lockProvider;
+        _cache = cache;
     }
 
     public async Task<OrderDto> ReserveSeatsAsync(Guid userId, ReserveSeatsRequest request, CancellationToken cancellationToken = default)
@@ -37,30 +50,52 @@ public class ReservationService
         var seats = request.SeatIds
             .Select(seatId => session.Seats.FirstOrDefault(s => s.Id == seatId)
                 ?? throw new NotFoundException($"Seat {seatId} was not found in this session."))
+            .OrderBy(s => s.Id) // consistent lock order across concurrent multi-seat requests avoids deadlock
             .ToList();
 
-        // Two passes: fail the whole request before reserving anything if any seat is
-        // unavailable, so a request never leaves a partial set of seats reserved.
-        // This check-then-act is only race-free within a single process; coordinating
-        // it across multiple API instances is exactly the job Redis takes over later.
-        var unavailable = seats.Where(s => s.Status != Domain.Enums.SeatStatus.Available).ToList();
-        if (unavailable.Count > 0)
-            throw new DomainException($"Seat(s) {string.Join(", ", unavailable.Select(s => $"{s.Row}{s.Number}"))} are no longer available.");
-
-        var now = _dateTimeProvider.UtcNow;
-        var order = new Order(userId, session.Id, now);
-
-        foreach (var seat in seats)
+        var locks = new List<IDistributedLock>();
+        try
         {
-            seat.Reserve(now, HoldDuration);
-            order.AddItem(seat.Id, session.TicketPrice);
+            foreach (var seat in seats)
+            {
+                var @lock = await _lockProvider.TryAcquireAsync($"seat-lock:{seat.Id}", SeatLockDuration, cancellationToken);
+                if (@lock is null)
+                    throw new DomainException($"Seat {seat.Row}{seat.Number} is currently being reserved by someone else. Please try again.");
+
+                locks.Add(@lock);
+            }
+
+            // The seats above were loaded before we held any lock, so another
+            // request could have reserved one of them in the meantime. Now that
+            // every lock is held, force a fresh read so the availability check
+            // below reflects the true current state instead of a stale snapshot.
+            await _eventRepository.ReloadSeatsAsync(seats.Select(s => s.Id), cancellationToken);
+
+            var unavailable = seats.Where(s => s.Status != Domain.Enums.SeatStatus.Available).ToList();
+            if (unavailable.Count > 0)
+                throw new DomainException($"Seat(s) {string.Join(", ", unavailable.Select(s => $"{s.Row}{s.Number}"))} are no longer available.");
+
+            var now = _dateTimeProvider.UtcNow;
+            var order = new Order(userId, session.Id, now);
+
+            foreach (var seat in seats)
+            {
+                seat.Reserve(now, HoldDuration);
+                order.AddItem(seat.Id, session.TicketPrice);
+            }
+
+            await _eventRepository.UpdateAsync(@event, cancellationToken);
+            await _orderRepository.AddAsync(order, cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+            await _cache.RemoveAsync($"session:{session.Id}", cancellationToken);
+
+            return ToOrderDto(order);
         }
-
-        await _eventRepository.UpdateAsync(@event, cancellationToken);
-        await _orderRepository.AddAsync(order, cancellationToken);
-        await _unitOfWork.SaveChangesAsync(cancellationToken);
-
-        return ToOrderDto(order);
+        finally
+        {
+            foreach (var @lock in locks)
+                await @lock.DisposeAsync();
+        }
     }
 
     public async Task<OrderDto> ConfirmOrderAsync(Guid userId, Guid orderId, CancellationToken cancellationToken = default)
@@ -78,6 +113,7 @@ public class ReservationService
         await _eventRepository.UpdateAsync(@event, cancellationToken);
         await _orderRepository.UpdateAsync(order, cancellationToken);
         await _unitOfWork.SaveChangesAsync(cancellationToken);
+        await _cache.RemoveAsync($"session:{session.Id}", cancellationToken);
 
         return ToOrderDto(order);
     }
@@ -97,6 +133,7 @@ public class ReservationService
         await _eventRepository.UpdateAsync(@event, cancellationToken);
         await _orderRepository.UpdateAsync(order, cancellationToken);
         await _unitOfWork.SaveChangesAsync(cancellationToken);
+        await _cache.RemoveAsync($"session:{session.Id}", cancellationToken);
 
         return ToOrderDto(order);
     }

@@ -31,6 +31,13 @@ public class EfEventRepository : IEventRepository
     public Task UpdateAsync(Event @event, CancellationToken cancellationToken = default)
         => Task.CompletedTask;
 
+    public async Task ReloadSeatsAsync(IEnumerable<Guid> seatIds, CancellationToken cancellationToken = default)
+    {
+        var ids = seatIds.ToHashSet();
+        foreach (var entry in _context.ChangeTracker.Entries<Seat>().Where(e => ids.Contains(e.Entity.Id)))
+            await entry.ReloadAsync(cancellationToken);
+    }
+
     private IQueryable<Event> Query()
         => _context.Events.Include(e => e.Sessions).ThenInclude(s => s.Seats);
 }
