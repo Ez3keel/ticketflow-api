@@ -642,6 +642,36 @@ usuário. Rodar mais que isso misturaria duas causas possíveis de rejeição
 (`409` do lock vs. `429` do rate limiter) numa única asserção, tornando
 uma falha futura ambígua sobre qual mecanismo quebrou.
 
+**Adendo (achado na Fase 9): os testes desta fase passavam pelo motivo
+errado**. Ao começar a Fase 9 rodei `docker compose down` pra testar tudo
+containerizado do zero — e, pra minha surpresa, `dotnet test` nos testes de
+integração passou a falhar com "Failed to connect to 127.0.0.1:5432"
+(a porta *fixa* do Postgres, não a porta dinâmica que o Testcontainers
+mapeia). Investigando, descobri que `TicketFlowApiFactory` sobrescrevia a
+connection string via `ConfigureWebHost` → `ConfigureAppConfiguration`, mas
+isso roda **depois** que o próprio `Program.cs` já executou
+`AddInfrastructure(builder.Configuration)` — que lê `configuration.
+GetConnectionString("Postgres")` e captura o valor numa variável local
+imediatamente, antes de qualquer coisa que o `WebApplicationFactory`
+injete depois. Ou seja: o teste **nunca** usou o container do
+Testcontainers — ele sempre se conectou, sem eu perceber, no Postgres do
+meu `docker-compose` local, que por acaso já estava rodando na porta 5432
+o tempo todo durante as Fases 3 a 8. Só quebrou quando derrubei esse
+container. A correção: sobrescrever via **variável de ambiente**
+(`Environment.SetEnvironmentVariable("ConnectionStrings__Postgres", ...)`)
+antes de acessar `Services` — variáveis de ambiente são lidas por
+`WebApplication.CreateBuilder` no início da execução do `Main`, então
+chegam a tempo, ao contrário de uma configuração adicionada depois que o
+código já leu e capturou o valor. É a mesma técnica (e o mesmo motivo) que
+o `docker-compose.yml` da Fase 9 usa pra apontar os serviços um pro outro.
+
+O motivo de eu estar contando isso com essa riqueza de detalhe: é um
+lembrete de que "os testes passam" não é a mesma coisa que "os testes
+provam o que eu acho que provam" — vale a pena, de vez em quando,
+propositalmente quebrar a dependência externa que um teste diz usar (aqui,
+derrubar o Postgres local) só pra confirmar que ele falha do jeito
+esperado quando ela não existe.
+
 ---
 
 ## Fase 8 — Observabilidade (OpenTelemetry: métricas + tracing distribuído)
@@ -725,6 +755,70 @@ reais refletindo exatamente a operação que acabara de rodar.
 
 ---
 
-## Próximas entradas neste documento
+## Fase 9 — Empacotamento final
 
-- Fase 9 — Empacotamento final (Docker Compose único, README com diagrama)
+**O que foi feito**: a API e o worker ganharam `Dockerfile`s (multi-stage
+build) e entraram no `docker-compose.yml`, que agora sobe o sistema
+inteiro — banco, cache, fila, tracing, **e a aplicação** — com um único
+`docker compose up -d --build`. Até a Fase 8, o compose só subia
+infraestrutura; API e worker sempre rodaram via `dotnet run` direto na
+máquina. Também entrou um diagrama de arquitetura (Mermaid) no `README.md`
+e uma tabela resumindo as 9 fases.
+
+**Por que manter as duas formas de rodar** (tudo em container vs. API/worker
+locais + infra em container): são públicos diferentes. "Tudo em container"
+é o que alguém avaliando o projeto roda pra ver funcionando sem instalar
+nada além de Docker. "API/worker locais" é o que você usa no dia a dia
+desenvolvendo — sem rebuild de imagem a cada mudança de código. O
+`docker-compose.yml` sozinho serve os dois casos: `docker compose up -d
+postgres redis rabbitmq jaeger` sobe só a infra (fluxo de desenvolvimento);
+acrescentar `--build` sem restringir os serviços sobe tudo.
+
+**Bug real encontrado containerizando o worker**: a imagem final do
+`Dockerfile` do worker inicialmente usava `mcr.microsoft.com/dotnet/
+runtime:8.0` — parecia certo, já que o worker é um *generic host* sem
+Kestrel, não uma aplicação web. Ao rodar, ele crashava na inicialização
+pedindo o framework compartilhado `Microsoft.AspNetCore.App`, que essa
+imagem não tem. Causa: `TicketFlow.Worker` referencia
+`TicketFlow.Infrastructure`, que contém `TicketFlowHub : Hub` (SignalR) —
+mesmo o worker nunca hospedando esse Hub (só publica nele via `IHubContext`
+através do backplane), o tipo `Hub` em si exige o runtime do ASP.NET Core
+carregado no processo. Troquei a imagem final pra
+`mcr.microsoft.com/dotnet/aspnet:8.0` (a mesma que a API usa) e resolveu.
+Isso só apareceu rodando containerizado — `dotnet run` local nunca teria
+esse problema, porque o SDK instalado na máquina já tem todos os runtimes
+disponíveis, mascarando a dependência real.
+
+**Connection strings diferentes por ambiente, via variáveis de ambiente**:
+dentro de um container, `localhost` aponta pro próprio container, não pros
+outros serviços do compose. O `docker-compose.yml` sobrescreve
+`ConnectionStrings__Postgres`, `ConnectionStrings__Redis`, `RabbitMq__*` e
+`Otel__OtlpEndpoint` nos serviços `api` e `worker` pra usar os nomes dos
+serviços do Docker (`postgres`, `redis`, `rabbitmq`, `jaeger`) — a mesma
+técnica de sempre (variável de ambiente sobrescrevendo `appsettings.
+Development.json`, igual a chave JWT desde a Fase 1), só que aplicada a
+mais um ambiente (container) além de "local" e "teste".
+
+**Uma pegadinha a mais, específica do worker**: o listener HTTP do
+Prometheus (Fase 8) estava fixo em `http://localhost:9464/`, o que funciona
+rodando local mas seria inacessível de fora do container (ninguém consegue
+fazer *scrape* de uma porta que só escuta loopback). Virou configurável
+(`Otel:PrometheusListenerPrefix`), com `localhost` como padrão seguro pro
+`dotnet run` (evita precisar de privilégio de administrador no Windows pra
+abrir um `HttpListener` em wildcard) e `http://+:9464/` só quando
+containerizado (sem essa restrição dentro do Linux do container).
+
+**Validado na prática**: build das duas imagens, subida do stack completo
+(6 containers), e o mesmo teste de ponta a ponta de sempre — registro,
+criar evento/sessão/assento, reservar, confirmar — rodando inteiramente
+contra os serviços containerizados. Conferi também `/metrics` nos dois
+processos e o Jaeger recebendo traces de `TicketFlow.Api` e
+`TicketFlow.Worker`, tudo rodando de dentro de containers Docker.
+
+---
+
+Esse documento acompanhou as 9 fases do roadmap original, da estrutura
+inicial da solution até um sistema completo rodando containerizado com
+observabilidade de ponta a ponta. Se você chegou até aqui lendo tudo:
+esse é o material — junto com o código e os commits — que sustenta uma
+conversa de entrevista técnica sobre cada decisão tomada neste projeto.

@@ -53,5 +53,57 @@ services:
       - "4317:4317"   # OTLP gRPC (what the Api/Worker export traces to)
       - "4318:4318"   # OTLP HTTP
 
+  api:
+    build:
+      context: .
+      dockerfile: src/TicketFlow.Api/Dockerfile
+    container_name: ticketflow-api
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      # Container-to-container hostnames (the Docker network's internal DNS),
+      # overriding appsettings.Development.json's "localhost" values -- those are
+      # correct for `dotnet run` on the host, meaningless from inside a container.
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=ticketflow;Username=ticketflow;Password=ticketflow_dev_only
+      ConnectionStrings__Redis: redis:6379
+      RabbitMq__HostName: rabbitmq
+      RabbitMq__Port: "5672"
+      RabbitMq__UserName: guest
+      RabbitMq__Password: guest
+      Otel__OtlpEndpoint: http://jaeger:4317
+      Jwt__SigningKey: 3glvz3kthqfCpxT9zP279NeAMI8ZYx2jQQrsK6HwI90=
+    ports:
+      - "5299:8080"
+
+  worker:
+    build:
+      context: .
+      dockerfile: src/TicketFlow.Worker/Dockerfile
+    container_name: ticketflow-worker
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    environment:
+      DOTNET_ENVIRONMENT: Development
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=ticketflow;Username=ticketflow;Password=ticketflow_dev_only
+      ConnectionStrings__Redis: redis:6379
+      RabbitMq__HostName: rabbitmq
+      RabbitMq__Port: "5672"
+      RabbitMq__UserName: guest
+      RabbitMq__Password: guest
+      Otel__OtlpEndpoint: http://jaeger:4317
+      # See Program.cs: "localhost" (the dotnet-run default) would only be
+      # reachable from inside this container, never from the host trying to scrape it.
+      Otel__PrometheusListenerPrefix: http://+:9464/
+    ports:
+      - "9464:9464"
+
 volumes:
   ticketflow-postgres-data:
