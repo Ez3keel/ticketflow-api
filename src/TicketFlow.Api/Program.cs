@@ -2,6 +2,7 @@ using System.Text;
 using FluentValidation;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
+using Scalar.AspNetCore;
 using Serilog;
 using TicketFlow.Application.Auth;
 using TicketFlow.Application.Events;
@@ -81,8 +82,12 @@ app.UseMiddleware<TicketFlow.Api.Middleware.ExceptionHandlingMiddleware>();
 
 if (app.Environment.IsDevelopment())
 {
-    app.UseSwagger();
-    app.UseSwaggerUI();
+    app.UseSwagger(options => options.RouteTemplate = "openapi/{documentName}.json");
+    app.MapScalarApiReference(options =>
+    {
+        options.Title = "TicketFlow API";
+        options.OpenApiRoutePattern = "/openapi/{documentName}.json";
+    });
 }
 
 app.UseHttpsRedirection();
