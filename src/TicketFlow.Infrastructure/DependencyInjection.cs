@@ -54,6 +54,10 @@ public static class DependencyInjection
             };
             return factory.CreateConnectionAsync().GetAwaiter().GetResult();
         });
+        // Cheap to construct on its own -- resolving IConnection (and therefore
+        // actually connecting) only happens the first time something accesses
+        // .Value, not just because something needed a Lazy<IConnection> to exist.
+        services.AddSingleton(sp => new Lazy<IConnection>(() => sp.GetRequiredService<IConnection>()));
         services.AddSingleton<IOrderQueue, RabbitMqOrderQueue>();
 
         services.AddScoped<IEventRepository, EfEventRepository>();

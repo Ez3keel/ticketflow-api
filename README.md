@@ -46,6 +46,15 @@ com header `Retry-After`.
 dotnet test
 ```
 
+`TicketFlow.Domain.Tests` são testes unitários puros (sem dependências).
+`TicketFlow.IntegrationTests` sobe a API real contra Postgres/Redis/RabbitMQ
+**reais** via [Testcontainers](https://testcontainers.com/) — containers
+Docker descartáveis, criados e destruídos automaticamente a cada execução —
+e prova a concorrência de verdade: disparar várias reservas simultâneas
+para o mesmo assento e confirmar que só uma vence. Precisa do Docker
+rodando, mas **não** precisa do `docker compose up` manual — os containers
+de teste são isolados dos containers de desenvolvimento.
+
 ## Estrutura
 
 ```
@@ -56,7 +65,8 @@ src/
   TicketFlow.Api              — controllers, autenticação, composição
   TicketFlow.Worker          — consome a fila de confirmação de pedidos
 tests/
-  TicketFlow.Domain.Tests    — testes xUnit das regras de domínio
+  TicketFlow.Domain.Tests       — testes xUnit das regras de domínio
+  TicketFlow.IntegrationTests   — testes de concorrência de ponta a ponta (Testcontainers)
 docs/
   DECISOES-DE-ARQUITETURA.md — o porquê de cada decisão, fase a fase
 ```

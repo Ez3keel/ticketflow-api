@@ -573,8 +573,78 @@ de um cliente bem-comportado demorar mais pra convergir).
 
 ---
 
+## Fase 7 — Testes de integração de ponta a ponta (Testcontainers)
+
+**O que foi feito**: um projeto novo, `TicketFlow.IntegrationTests`, que
+sobe a API **de verdade** (via `WebApplicationFactory<Program>`) contra
+Postgres, Redis e RabbitMQ **reais**, rodando em containers Docker
+descartáveis criados e destruídos automaticamente a cada execução via
+[Testcontainers](https://testcontainers.com/). O teste principal dispara 5
+requisições `POST /orders/reserve` em paralelo para o **mesmo** assento e
+prova, de forma automatizada e repetível, que exatamente uma tem sucesso —
+o mesmo cenário que eu validava manualmente com `curl` desde a Fase 3, mas
+agora rodando com `dotnet test`, sem nenhum passo manual.
+
+**Por que não bastava mockar os repositórios**: os 33 testes de domínio
+provam que as *regras de negócio* estão certas — `Seat.Reserve()` não pode
+ser chamado duas vezes, etc. Mas a race condition que o Redis resolve não
+vive na regra de negócio, vive na **interação entre processos concorrentes
+e um banco de dados real**. Um teste de unidade com repositórios falsos
+(uma lista em memória, por exemplo) não seria capaz de provar isso — daria
+"verde" mesmo se o lock distribuído estivesse quebrado, porque nada ali
+seria realmente concorrente do jeito que múltiplas instâncias da API
+disputando o Postgres são. Só um teste contra a infraestrutura de verdade
+prova a coisa real.
+
+**Por que Testcontainers em vez de exigir `docker compose up` antes de
+rodar os testes**: com Testcontainers, `dotnet test` sozinho já sobe (e
+depois destrói) os containers necessários — ninguém que clonar esse
+repositório precisa lembrar de nenhum passo manual antes de rodar a suíte
+inteira, e os containers de teste nunca colidem com os do
+`docker-compose.yml` de desenvolvimento (portas mapeadas dinamicamente,
+banco de dados isolado). É também exatamente como pipelines de CI/CD fazem
+isso hoje em dia.
+
+**Dois bugs reais que esse teste pegou, que nenhum teste de unidade jamais
+pegaria**:
+
+1. **Credenciais do RabbitMQ**: o container de teste do RabbitMQ gera
+   usuário/senha aleatórios por padrão — bastou fixar `guest`/`guest`
+   explicitamente na configuração do container de teste pra bater com o
+   que a aplicação esperava.
+2. **Um problema de design real, não só um problema de teste**: o teste
+   revelou que `POST /orders/reserve` — que nunca usa a fila — estava,
+   mesmo assim, **exigindo uma conexão viva com o RabbitMQ** pra
+   funcionar. A causa: o ASP.NET Core resolve a árvore de dependências
+   inteira do construtor assim que alguém precisa de uma instância.
+   `OrdersController` depende de `ReservationService`, que depende de
+   `IOrderQueue`, que (antes da correção) dependia de `IConnection`
+   diretamente — então, só de **construir** `ReservationService` pra
+   atender *qualquer* rota do controller, a aplicação tentava conectar no
+   RabbitMQ, mesmo que a rota específica (`reserve`, `cancel`, `get`)
+   nunca fosse tocar a fila. Corrigi trocando a dependência de
+   `RabbitMqOrderQueue` de `IConnection` para `Lazy<IConnection>` — agora
+   a conexão só é estabelecida de verdade dentro de
+   `EnqueueConfirmationAsync`, que só `RequestConfirmationAsync` chama.
+   Isso significa que, em produção, se o RabbitMQ cair, reservar e
+   cancelar continuam funcionando normalmente — só confirmar pagamento
+   fica indisponível, que é o raio de impacto correto (muito menor do que
+   "a venda de ingressos inteira para" que era o comportamento antes).
+
+Esse segundo achado é o tipo de coisa que só aparece quando você testa
+contra infraestrutura de verdade — com repositórios/filas falsos, o "bug"
+nem existiria, porque um fake nunca falha ao conectar.
+
+**Limite de concorrência ajustado pra caber no rate limit**: os testes
+disparam só 5 requisições simultâneas (não 20, como na primeira versão),
+porque o token bucket da Fase 6 já limita reservas a 5 por 10s por
+usuário. Rodar mais que isso misturaria duas causas possíveis de rejeição
+(`409` do lock vs. `429` do rate limiter) numa única asserção, tornando
+uma falha futura ambígua sobre qual mecanismo quebrou.
+
+---
+
 ## Próximas entradas neste documento
 
-- Fase 7 — Testes de concorrência de ponta a ponta (xUnit)
 - Fase 8 — Observabilidade (métricas + tracing distribuído)
 - Fase 9 — Empacotamento final (Docker Compose único, README com diagrama)

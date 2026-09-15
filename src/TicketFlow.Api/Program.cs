@@ -201,3 +201,8 @@ app.MapControllers();
 app.MapHub<TicketFlowHub>("/hubs/ticketflow");
 
 app.Run();
+
+// Exposes the otherwise-internal top-level Program class so
+// WebApplicationFactory<Program> can boot this app in-process for integration
+// tests (TicketFlow.IntegrationTests).
+public partial class Program;
