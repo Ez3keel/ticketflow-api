@@ -1,0 +1,203 @@
+# Decisões de arquitetura — TicketFlow
+
+Este documento existe para você aprender com o raciocínio por trás de cada
+decisão, não só ver o código pronto. Cada seção corresponde a um bloco de
+commits e segue o mesmo formato: **o que foi feito**, **por que**, e **o que
+teria acontecido se tivéssemos feito diferente**.
+
+Vou atualizar este arquivo a cada nova fase do roadmap.
+
+---
+
+## Fase 0/1 — Estrutura da solution
+
+**O que foi feito**: 4 projetos (`Domain`, `Application`, `Infrastructure`,
+`Api`) mais um projeto de testes (`Domain.Tests`), com referências que só
+apontam "para dentro": `Api` e `Infrastructure` dependem de `Application`,
+que depende de `Domain`. `Domain` não depende de nada.
+
+**Por quê**: essa é a "Regra da Dependência" da Clean Architecture — as
+camadas mais internas (regras de negócio) nunca devem saber que camadas
+externas (banco, fila, web) existem. Isso é o que permite trocar o
+PostgreSQL por outro banco, ou adicionar RabbitMQ, sem tocar em uma linha
+sequer do `Domain` ou do `Application`.
+
+**O que aconteceria diferente**: se `Domain` referenciasse o Entity
+Framework (como muita gente faz colocando atributos `[Key]`, `[Column]`
+direto nas entidades), qualquer troca de ORM ou de banco exigiria reescrever
+as entidades. Isolar isso agora é o que vai deixar a Fase 2 (Postgres/EF
+Core) ser "só" uma implementação nova de interfaces já existentes, sem
+mexer no que já funciona.
+
+---
+
+## Fase 0 — Modelagem do domínio (`Seat`, `Order`, `Event`)
+
+**O que foi feito**: `Seat` é uma máquina de estados
+(`Available → Reserved → Sold`) com métodos que validam a própria transição
+(`Reserve`, `Confirm`, `Release`) em vez de um setter público de `Status`.
+O mesmo vale para `Order` (`PendingPayment → Confirmed/Cancelled/Expired`).
+
+**Por quê**: isso é o padrão **Rich Domain Model** (em oposição ao *Anemic
+Domain Model*, onde entidades são só sacos de propriedades e toda a lógica
+fica espalhada em serviços). Colocar a regra dentro da entidade garante que
+é **impossível** deixar um `Seat` num estado inválido em qualquer lugar do
+código — o compilador força você a passar pelo método, que valida antes de
+mudar o estado.
+
+**O que aconteceria diferente**: se `Status` fosse uma propriedade pública
+com `set`, bastaria alguém escrever `seat.Status = SeatStatus.Sold` em
+qualquer lugar (num controller, num teste, num script de seed) pra pular
+toda validação — e aí seu sistema de ingressos venderia o mesmo assento duas
+vezes sem nenhum erro.
+
+**Trade-off consciente**: o comentário em
+[`ReservationService.cs`](../src/TicketFlow.Application/Reservations/ReservationService.cs)
+é importante — a checagem "todo mundo disponível?" seguida de "reserva
+todo mundo" é seguro dentro de um processo (graças ao `lock` implícito do
+`ConcurrentDictionary`), mas **não é seguro entre múltiplas instâncias da
+API rodando ao mesmo tempo**. Isso é proposital: é exatamente o problema que
+o Redis vai resolver na Fase 3. Construir a versão "ingênua" primeiro e
+sentir o problema na pele é mais didático do que já começar com Redis sem
+entender por que ele é necessário.
+
+---
+
+## Fase 1 — `User` / `RefreshToken` com rotação
+
+**O que foi feito**: cada refresh token tem um `ExpiresAtUtc` e um
+`RevokedAtUtc`. Ao usar um refresh token pra pegar um novo access token
+(`RotateRefreshToken`), o token antigo é **revogado** e um novo é emitido —
+o token antigo nunca mais funciona, mesmo que ainda não tivesse expirado.
+
+**Por quê**: isso é chamado de *refresh token rotation* e é a defesa padrão
+contra roubo de token. Se alguém roubar um refresh token e usá-lo, o dono
+legítimo vai tentar usar o token dele (que já foi revogado pelo atacante) e
+vai falhar — isso é um sinal de comprometimento que sistemas de produção
+usam pra revogar *todos* os tokens daquele usuário automaticamente. Aqui não
+implementei essa detecção completa (seria over-engineering para o escopo
+atual), mas a estrutura de dados já suporta.
+
+**Senha com PBKDF2 em vez de uma lib de terceiros**: usei
+`Rfc2898DeriveBytes.Pbkdf2`, que já vem embutido no .NET, em vez de
+BCrypt.Net ou similar. Duas razões: (1) evita mais uma dependência externa
+pra algo que o framework já resolve bem, e (2) `CryptographicOperations.
+FixedTimeEquals` na comparação evita *timing attacks* — comparar hashes com
+`==` normal vazaria informação sobre quantos caracteres bateram, porque
+`==` para de comparar no primeiro byte diferente.
+
+---
+
+## Fase 1 — Camada `Application` (casos de uso)
+
+**O que foi feito**: interfaces (`IEventRepository`, `IUserRepository`,
+`IPasswordHasher`, `IJwtTokenGenerator`, `IDateTimeProvider`) definidas
+*aqui*, implementadas depois na `Infrastructure`. Os serviços
+(`AuthService`, `EventCatalogService`, `ReservationService`) dependem só
+dessas interfaces, nunca de uma implementação concreta.
+
+**Por quê**: isso é **Inversão de Dependência** (o "D" do SOLID). A camada
+de regras de negócio dita o contrato ("preciso de algo que salve um
+usuário"); a infraestrutura obedece esse contrato. Isso também é o que
+torna os serviços testáveis sem precisar de banco de dados de verdade — dá
+pra testar `AuthService` com um `IUserRepository` fake em memória.
+
+**`IDateTimeProvider` em vez de `DateTime.UtcNow` direto**: parece um
+detalhe bobo, mas sem isso seria impossível escrever um teste
+determinístico tipo "criei um pedido, avancei o relógio 11 minutos, o
+assento deveria estar liberado" — o teste ficaria refém do tempo real de
+execução. Isso vai ficar mais importante ainda quando a expiração de
+reserva virar automática (fila/worker).
+
+**Por que não usei MediatR/CQRS**: é um padrão popular em projetos Clean
+Architecture no .NET, mas adiciona uma camada de indireção (commands,
+handlers, pipeline behaviors) que você ainda não pediu pra aprender. Serviços
+de aplicação simples com métodos diretos cobrem o mesmo objetivo de
+separação de camadas com menos conceitos novos de uma vez. Se depois você
+quiser adicionar CQRS como aprendizado extra, dá pra migrar gradualmente.
+
+---
+
+## Fase 1 — `Infrastructure` (repositórios em memória, JWT)
+
+**O que foi feito**: repositórios `InMemoryEventRepository`,
+`InMemoryOrderRepository`, `InMemoryUserRepository` guardando dados em
+`ConcurrentDictionary`, registrados como **Singleton** no DI (não Scoped).
+
+**Por quê Singleton**: no ASP.NET Core, uma classe registrada como `Scoped`
+ganha uma instância *nova* a cada requisição HTTP. Se os repositórios em
+memória fossem Scoped, cada requisição começaria com um dicionário vazio —
+você criaria um evento numa requisição e ele "sumiria" na próxima. Singleton
+garante que a mesma instância (e os mesmos dados) sobrevive durante toda a
+vida do processo.
+
+**O que muda na Fase 2**: quando trocarmos para EF Core + PostgreSQL, os
+repositórios passam a depender de um `DbContext`, e `DbContext` **deve** ser
+Scoped (ele não é thread-safe e representa uma transação/unidade de
+trabalho por requisição). Ou seja, a mudança de Singleton → Scoped não é
+acidental, é uma consequência direta de trocar "dicionário em memória" por
+"conexão de banco real".
+
+**JWT com `MapInboundClaims = false`**: por padrão, o
+`JwtSecurityTokenHandler` do .NET remapeia silenciosamente o claim `sub`
+para `ClaimTypes.NameIdentifier` (um nome de claim antigo do WS-Federation).
+Isso causa um bug clássico e confuso: você emite um token com `sub`, mas ao
+tentar ler `User.FindFirstValue(JwtRegisteredClaimNames.Sub)` no controller,
+não encontra nada. Desabilitei esse remapeamento pra manter os nomes dos
+claims exatamente como foram emitidos.
+
+---
+
+## Fase 1 — `Api` (controllers, middleware de erro)
+
+**O que foi feito**: um `ExceptionHandlingMiddleware` central que
+transforma `NotFoundException` → 404, `DomainException` → 409, e qualquer
+outra exceção não tratada → 500 com log estruturado. Os controllers não têm
+nenhum `try/catch`.
+
+**Por quê**: sem isso, cada método de cada controller precisaria repetir o
+mesmo bloco try/catch pra transformar exceções de negócio em respostas
+HTTP corretas. Centralizar isso em um middleware significa que a regra "erro
+de domínio = 409" é escrita uma vez só, e todo controller novo já ganha esse
+comportamento de graça.
+
+**Por que 409 (Conflict) para `DomainException` e não 400 (Bad Request)**:
+400 é reservado, por convenção, para "a requisição em si está malformada"
+(é isso que o FluentValidation cobre — email inválido, campo vazio). 409 diz
+"a requisição está bem formada, mas conflita com o estado atual do
+recurso" — que é exatamente o caso de "esse assento não está mais
+disponível".
+
+**Validação manual com `IValidator<T>` em vez de um filtro global**: dava
+pra automatizar isso com um `IActionFilter` que valida todo DTO
+automaticamente. Optei por deixar explícito em cada endpoint
+(`await _validator.ValidateAsync(...)`) porque, no seu nível atual, ver o
+"onde" e "quando" a validação acontece é mais valioso pra aprendizado do que
+a conveniência de automatizar — é um replace fácil de fazer depois, quando
+o padrão já estiver internalizado.
+
+---
+
+## Documentação com Scalar
+
+**O que foi feito**: troquei a Swagger UI clássica pela interface do
+Scalar (`/scalar/v1`), mantendo o Swashbuckle apenas para *gerar* o
+documento OpenAPI (`/openapi/v1.json`) — o Scalar só consome esse JSON e
+desenha a interface.
+
+**Por quê**: Scalar é mais moderno visualmente, tem um recurso de
+"try it out" mais fluido (inclusive gera snippets de código em várias
+linguagens) e é o que a maior parte de projetos .NET novos vem adotando no
+lugar do Swagger UI. Tecnicamente as duas fazem a mesma coisa — renderizar
+um documento OpenAPI — a diferença é só a camada de apresentação.
+
+---
+
+## Próximas entradas neste documento
+
+- Fase 2 — PostgreSQL + EF Core (o que muda nos repositórios, migrations,
+  por que Scoped)
+- Fase 3 — Redis (lock distribuído, por que o problema do
+  `ReservationService` só se resolve de verdade aqui)
+- Fase 4 — RabbitMQ (processamento assíncrono do pagamento)
+- Fase 5 — SignalR (mapa de assentos em tempo real)
