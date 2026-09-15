@@ -1,6 +1,5 @@
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
-using Microsoft.Extensions.Configuration;
 using Testcontainers.PostgreSql;
 using Testcontainers.RabbitMq;
 using Testcontainers.Redis;
@@ -34,32 +33,35 @@ public class TicketFlowApiFactory : WebApplicationFactory<Program>, IAsyncLifeti
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Development");
-
-        // Layered on top of appsettings.Development.json (higher precedence),
-        // pointing every connection string at this test run's own throwaway
-        // containers instead of whatever docker-compose happens to have running
-        // locally -- the two must never collide.
-        builder.ConfigureAppConfiguration((_, configBuilder) =>
-        {
-            configBuilder.AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                ["ConnectionStrings:Postgres"] = _postgres.GetConnectionString(),
-                ["ConnectionStrings:Redis"] = _redis.GetConnectionString(),
-                ["RabbitMq:HostName"] = _rabbitMq.Hostname,
-                ["RabbitMq:Port"] = _rabbitMq.GetMappedPublicPort(5672).ToString(),
-                ["RabbitMq:UserName"] = "guest",
-                ["RabbitMq:Password"] = "guest",
-                ["Jwt:Issuer"] = "TicketFlow",
-                ["Jwt:Audience"] = "TicketFlow.Client",
-                ["Jwt:SigningKey"] = "3glvz3kthqfCpxT9zP279NeAMI8ZYx2jQQrsK6HwI90=",
-                ["Jwt:AccessTokenMinutes"] = "15"
-            });
-        });
     }
 
     public async Task InitializeAsync()
     {
         await Task.WhenAll(_postgres.StartAsync(), _redis.StartAsync(), _rabbitMq.StartAsync());
+
+        // Environment variables, not ConfigureAppConfiguration: Program.cs's
+        // top-level code calls AddInfrastructure(builder.Configuration) -- which
+        // reads and captures the connection strings into local variables -- as part
+        // of its own linear execution, before WebApplicationFactory gets a chance to
+        // layer ConfigureAppConfiguration sources onto the builder. That override
+        // would only affect values read *after* it runs, which the connection
+        // strings here aren't. Env vars, read by WebApplication.CreateBuilder itself
+        // at the very start of Main, are visible in time -- the same double-
+        // underscore convention docker-compose.yml already uses for the same reason.
+        Environment.SetEnvironmentVariable("ConnectionStrings__Postgres", _postgres.GetConnectionString());
+        Environment.SetEnvironmentVariable("ConnectionStrings__Redis", _redis.GetConnectionString());
+        Environment.SetEnvironmentVariable("RabbitMq__HostName", _rabbitMq.Hostname);
+        Environment.SetEnvironmentVariable("RabbitMq__Port", _rabbitMq.GetMappedPublicPort(5672).ToString());
+        Environment.SetEnvironmentVariable("RabbitMq__UserName", "guest");
+        Environment.SetEnvironmentVariable("RabbitMq__Password", "guest");
+        Environment.SetEnvironmentVariable("Jwt__Issuer", "TicketFlow");
+        Environment.SetEnvironmentVariable("Jwt__Audience", "TicketFlow.Client");
+        Environment.SetEnvironmentVariable("Jwt__SigningKey", "3glvz3kthqfCpxT9zP279NeAMI8ZYx2jQQrsK6HwI90=");
+        Environment.SetEnvironmentVariable("Jwt__AccessTokenMinutes", "15");
+        // No real OTLP collector in this test run; point it somewhere that will
+        // just fail silently on export rather than at whatever a stray
+        // docker-compose Jaeger happens to be running on.
+        Environment.SetEnvironmentVariable("Otel__OtlpEndpoint", "http://127.0.0.1:1");
 
         // Forces the host to actually build now (WebApplicationFactory otherwise
         // builds it lazily on the first client request). Program.cs already runs
