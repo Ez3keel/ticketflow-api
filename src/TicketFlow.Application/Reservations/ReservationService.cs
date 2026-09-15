@@ -1,5 +1,7 @@
+using System.Diagnostics;
 using TicketFlow.Application.Common.Exceptions;
 using TicketFlow.Application.Common.Interfaces;
+using TicketFlow.Application.Observability;
 using TicketFlow.Application.Reservations.Dtos;
 using TicketFlow.Domain.Entities;
 using TicketFlow.Domain.Exceptions;
@@ -25,6 +27,7 @@ public class ReservationService
     private readonly ICacheService _cache;
     private readonly IOrderQueue _orderQueue;
     private readonly IRealtimeNotifier _realtimeNotifier;
+    private readonly TicketFlowMetrics _metrics;
 
     public ReservationService(
         IEventRepository eventRepository,
@@ -34,7 +37,8 @@ public class ReservationService
         IDistributedLockProvider lockProvider,
         ICacheService cache,
         IOrderQueue orderQueue,
-        IRealtimeNotifier realtimeNotifier)
+        IRealtimeNotifier realtimeNotifier,
+        TicketFlowMetrics metrics)
     {
         _eventRepository = eventRepository;
         _orderRepository = orderRepository;
@@ -44,10 +48,17 @@ public class ReservationService
         _cache = cache;
         _orderQueue = orderQueue;
         _realtimeNotifier = realtimeNotifier;
+        _metrics = metrics;
     }
 
     public async Task<OrderDto> ReserveSeatsAsync(Guid userId, ReserveSeatsRequest request, CancellationToken cancellationToken = default)
     {
+        using var activity = TicketFlowActivitySource.Instance.StartActivity("ReserveSeats");
+        activity?.SetTag("ticketflow.session_id", request.SessionId);
+        activity?.SetTag("ticketflow.seat_count", request.SeatIds.Count);
+
+        var stopwatch = Stopwatch.StartNew();
+
         var @event = await _eventRepository.GetBySessionIdAsync(request.SessionId, cancellationToken)
             ?? throw new NotFoundException($"Session {request.SessionId} was not found.");
 
@@ -64,9 +75,15 @@ public class ReservationService
         {
             foreach (var seat in seats)
             {
+                using var lockActivity = TicketFlowActivitySource.Instance.StartActivity("AcquireSeatLock");
+                lockActivity?.SetTag("ticketflow.seat_id", seat.Id);
+
                 var @lock = await _lockProvider.TryAcquireAsync($"seat-lock:{seat.Id}", SeatLockDuration, cancellationToken);
                 if (@lock is null)
+                {
+                    _metrics.RecordSeatLockRejection();
                     throw new DomainException($"Seat {seat.Row}{seat.Number} is currently being reserved by someone else. Please try again.");
+                }
 
                 locks.Add(@lock);
             }
@@ -98,12 +115,15 @@ public class ReservationService
             foreach (var seat in seats)
                 await _realtimeNotifier.NotifySeatStatusChangedAsync(session.Id, seat.Id, seat.Status.ToString(), cancellationToken);
 
+            _metrics.RecordSeatsReserved(seats.Count);
             return ToOrderDto(order);
         }
         finally
         {
             foreach (var @lock in locks)
                 await @lock.DisposeAsync();
+
+            _metrics.RecordReservationDuration(stopwatch.Elapsed.TotalMilliseconds);
         }
     }
 

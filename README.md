@@ -5,8 +5,10 @@ fluxo — o foco é resolver, de verdade, o problema de concorrência de
 "milhares de pessoas tentando comprar o mesmo assento ao mesmo tempo", com
 Clean Architecture, PostgreSQL/EF Core, Redis (lock distribuído, cache e
 backplane do SignalR), RabbitMQ (confirmação assíncrona via worker), e
-SignalR (mapa de assentos e confirmação de pedido em tempo real), e rate
-limiting nos endpoints mais sensíveis a abuso.
+SignalR (mapa de assentos e confirmação de pedido em tempo real), rate
+limiting nos endpoints mais sensíveis a abuso, e observabilidade completa
+(métricas Prometheus + tracing distribuído com OpenTelemetry, conectando
+API e worker num único trace).
 
 O raciocínio por trás de cada decisão está documentado em
 [`docs/DECISOES-DE-ARQUITETURA.md`](docs/DECISOES-DE-ARQUITETURA.md) — vale
@@ -17,7 +19,7 @@ a leitura antes de mexer no código.
 Pré-requisitos: .NET 8 SDK, Docker Desktop.
 
 ```bash
-docker compose up -d postgres redis rabbitmq
+docker compose up -d postgres redis rabbitmq jaeger
 dotnet run --project src/TicketFlow.Api
 ```
 
@@ -40,6 +42,11 @@ Limites de requisição: 100 req/min por IP (global), 5 req/min por IP em
 em `/api/orders/reserve` (token bucket). Estourar o limite retorna `429`
 com header `Retry-After`.
 
+Observabilidade: traces em `http://localhost:16686` (UI do Jaeger) — faça
+uma reserva e confirme o pedido pra ver um trace só atravessando a API e o
+worker. Métricas de negócio em formato Prometheus na própria API
+(`/metrics`) e no worker (`http://localhost:9464/metrics`).
+
 ## Testes
 
 ```bash
@@ -61,7 +68,7 @@ de teste são isolados dos containers de desenvolvimento.
 src/
   TicketFlow.Domain          — entidades e regras de negócio, zero dependências externas
   TicketFlow.Application     — casos de uso, interfaces, DTOs, validação
-  TicketFlow.Infrastructure  — EF Core, Redis, RabbitMQ, SignalR Hub, JWT, hashing de senha
+  TicketFlow.Infrastructure  — EF Core, Redis, RabbitMQ, SignalR Hub, OpenTelemetry, JWT, hashing de senha
   TicketFlow.Api              — controllers, autenticação, composição
   TicketFlow.Worker          — consome a fila de confirmação de pedidos
 tests/

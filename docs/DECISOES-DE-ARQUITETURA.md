@@ -644,7 +644,87 @@ uma falha futura ambígua sobre qual mecanismo quebrou.
 
 ---
 
+## Fase 8 — Observabilidade (OpenTelemetry: métricas + tracing distribuído)
+
+**O que foi feito**: duas coisas complementares, ambas via OpenTelemetry:
+
+1. **Métricas de negócio** — um `Meter` customizado (`TicketFlowMetrics`, na
+   `Application`) com contadores (assentos reservados, rejeições de lock,
+   pedidos confirmados) e um histograma (duração da reserva). Exposto em
+   formato Prometheus: `/metrics` na API (via `AddPrometheusExporter` +
+   `MapPrometheusScrapingEndpoint`), e `:9464/metrics` no worker (via
+   `AddPrometheusHttpListener`, já que o worker não tem Kestrel/ASP.NET
+   Core pra hospedar um endpoint normal).
+2. **Tracing distribuído** — instrumentação automática de ASP.NET Core,
+   `HttpClient` e EF Core, mais spans manuais nos pontos que importam
+   (`ReserveSeats`, `AcquireSeatLock`, `ConfirmOrder`), exportados via OTLP
+   pro Jaeger.
+
+**Por que um `Meter`/`ActivitySource` na `Application` em vez de chamar a
+API do OpenTelemetry direto**: `System.Diagnostics.Metrics.Meter` e
+`System.Diagnostics.ActivitySource` são tipos do **BCL** (`System.
+Diagnostics.DiagnosticSource`), não do pacote OpenTelemetry — é assim que o
+.NET foi desenhado de propósito, pra separar "instrumentar seu código" de
+"escolher pra onde os dados vão". A `Application` cria contadores e spans
+sem saber que OpenTelemetry existe; é a `Infrastructure` quem "escuta"
+esses nomes (`AddMeter("TicketFlow")`, `AddSource("TicketFlow")`) e decide
+exportar pra Jaeger/Prometheus. Trocar o backend de observabilidade no
+futuro (Application Insights, Datadog, etc.) não tocaria uma linha sequer
+da lógica de negócio.
+
+**O problema real que o tracing resolve**: até aqui, entender "o que
+aconteceu com o pedido X" significava caçar linhas de log em dois
+terminais diferentes (API e worker) e casar manualmente pelo `orderId`.
+Com tracing distribuído, um clique no Jaeger mostra a árvore inteira — do
+`POST /orders/reserve` até o `ConfirmOrder` rodando no worker, minutos
+depois, em outro processo — como uma coisa só.
+
+**A parte tecnicamente mais interessante: propagar contexto através do
+RabbitMQ**. HTTP propaga contexto de trace automaticamente (headers
+`traceparent`/`tracestate`, padrão W3C) — é por isso que a instrumentação
+automática de `HttpClient` "simplesmente funciona". Uma mensagem de fila
+**não tem esse mecanismo de graça**: é só um array de bytes. Sem fazer nada
+extra, o span do worker processando a mensagem apareceria no Jaeger como um
+trace **completamente novo e desconectado** do trace da API que publicou a
+mensagem — tecnicamente "tracing", mas sem o "distribuído" que dá valor a
+isso.
+
+A correção manual, nos dois lados:
+- **Publicando** (`RabbitMqOrderQueue`): pega o contexto do trace atual
+  (`Activity.Current`) e injeta ele nos *headers* da mensagem AMQP, usando
+  `Propagators.DefaultTextMapPropagator.Inject(...)` — o mesmo mecanismo
+  que a instrumentação automática de HTTP usa por baixo dos panos, só que
+  chamado à mão.
+- **Consumindo** (`OrderConfirmationConsumer`): lê esses headers de volta
+  com `.Extract(...)` e usa o resultado como **pai** do novo span
+  (`ActivityKind.Consumer`), em vez de deixar o span nascer sem pai.
+
+O resultado, verificado na prática consultando a API do Jaeger: **um único
+`traceID`** contendo spans dos dois processos —
+`[Api] POST .../confirm` → `[Api] order-confirmations publish` →
+`[Worker] order-confirmations process` → `[Worker] ConfirmOrder` — exatamente
+o "caminho completo de uma compra" que o roadmap original pedia.
+
+**Por que os exportadores de Prometheus são diferentes na API e no
+worker**: `AddPrometheusExporter` (pacote `...AspNetCore`) precisa de
+roteamento de endpoints do ASP.NET Core pra funcionar — a API já tem isso.
+O worker é um *generic host* sem Kestrel; usar o mesmo exportador exigiria
+adicionar hospedagem web só pra isso. O pacote
+`OpenTelemetry.Exporter.Prometheus.HttpListener` existe exatamente pra esse
+cenário: sobe um `System.Net.HttpListener` cru, sem framework nenhum por
+trás, servindo o mesmo formato de texto Prometheus.
+
+**Validado na prática**: reservei e confirmei um pedido real; consultei
+`GET http://localhost:16686/api/traces?service=TicketFlow.Worker&
+operation=order-confirmations%20process` e confirmei um `traceID` só
+contendo spans de `TicketFlow.Api` e `TicketFlow.Worker`; conferi
+`/metrics` na API (`ticketflow_seats_reserved_seats_total`,
+`ticketflow_reservation_duration_milliseconds`) e `:9464/metrics` no
+worker (`ticketflow_orders_confirmed_orders_total`), ambos com valores
+reais refletindo exatamente a operação que acabara de rodar.
+
+---
+
 ## Próximas entradas neste documento
 
-- Fase 8 — Observabilidade (métricas + tracing distribuído)
 - Fase 9 — Empacotamento final (Docker Compose único, README com diagrama)

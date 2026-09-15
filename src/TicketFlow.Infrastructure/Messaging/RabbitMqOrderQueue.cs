@@ -1,7 +1,11 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using OpenTelemetry;
+using OpenTelemetry.Context.Propagation;
 using RabbitMQ.Client;
 using TicketFlow.Application.Common.Interfaces;
+using TicketFlow.Application.Observability;
 
 namespace TicketFlow.Infrastructure.Messaging;
 
@@ -36,11 +40,26 @@ public class RabbitMqOrderQueue : IOrderQueue
 
         var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new OrderConfirmationMessage(orderId)));
 
+        // A queue message is not an HTTP request, so nothing propagates trace context
+        // across it automatically the way ASP.NET Core's own instrumentation does for
+        // an outgoing HttpClient call. Doing it by hand -- inject here, extract in
+        // OrderConfirmationConsumer -- is what lets a single trace in Jaeger show the
+        // Api's publish span and the Worker's processing span as one connected chain,
+        // instead of two unrelated traces that happen to reference the same order id.
+        using var activity = TicketFlowActivitySource.Instance.StartActivity(
+            $"{RabbitMqSettings.OrderConfirmationQueue} publish", ActivityKind.Producer);
+
+        var headers = new Dictionary<string, object?>();
+        Propagators.DefaultTextMapPropagator.Inject(
+            new PropagationContext(activity?.Context ?? Activity.Current?.Context ?? default, Baggage.Current),
+            headers,
+            static (carrier, key, value) => carrier[key] = value);
+
         await channel.BasicPublishAsync(
             exchange: string.Empty,
             routingKey: RabbitMqSettings.OrderConfirmationQueue,
             mandatory: false,
-            basicProperties: new BasicProperties { Persistent = true },
+            basicProperties: new BasicProperties { Persistent = true, Headers = headers },
             body: body,
             cancellationToken: cancellationToken);
     }

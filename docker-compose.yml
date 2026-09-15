@@ -42,5 +42,16 @@ services:
       timeout: 5s
       retries: 10
 
+  jaeger:
+    image: jaegertracing/all-in-one:1.60
+    container_name: ticketflow-jaeger
+    restart: unless-stopped
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686" # UI
+      - "4317:4317"   # OTLP gRPC (what the Api/Worker export traces to)
+      - "4318:4318"   # OTLP HTTP
+
 volumes:
   ticketflow-postgres-data:

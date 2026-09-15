@@ -1,7 +1,11 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using OpenTelemetry;
+using OpenTelemetry.Context.Propagation;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
+using TicketFlow.Application.Observability;
 using TicketFlow.Application.Reservations;
 using TicketFlow.Infrastructure.Messaging;
 
@@ -60,10 +64,23 @@ public class OrderConfirmationConsumer : BackgroundService
     {
         var channel = _channel!;
 
+        // The other half of the manual propagation in RabbitMqOrderQueue: extract the
+        // trace context the Api injected into the message headers and start this
+        // span as its child, so Jaeger renders "reserve -> ... -> publish -> process
+        // -> confirm" as one trace instead of two disconnected ones that just happen
+        // to share an order id.
+        var parentContext = Propagators.DefaultTextMapPropagator.Extract(default, ea.BasicProperties.Headers, ExtractHeaderValue);
+        Baggage.Current = parentContext.Baggage;
+
+        using var activity = TicketFlowActivitySource.Instance.StartActivity(
+            $"{RabbitMqSettings.OrderConfirmationQueue} process", ActivityKind.Consumer, parentContext.ActivityContext);
+
         try
         {
             var message = JsonSerializer.Deserialize<OrderConfirmationMessage>(Encoding.UTF8.GetString(ea.Body.Span))
                 ?? throw new InvalidOperationException("Received an empty order confirmation message.");
+
+            activity?.SetTag("ticketflow.order_id", message.OrderId);
 
             _logger.LogInformation("Processing confirmation for order {OrderId}.", message.OrderId);
             await Task.Delay(SimulatedPaymentProcessingTime);
@@ -91,5 +108,15 @@ public class OrderConfirmationConsumer : BackgroundService
             await _channel.CloseAsync(cancellationToken);
 
         await base.StopAsync(cancellationToken);
+    }
+
+    // RabbitMQ.Client round-trips header values as byte[] on the consuming side even
+    // though RabbitMqOrderQueue set them as plain strings when publishing.
+    private static IEnumerable<string> ExtractHeaderValue(IDictionary<string, object?>? headers, string key)
+    {
+        if (headers is not null && headers.TryGetValue(key, out var value) && value is byte[] bytes)
+            return [Encoding.UTF8.GetString(bytes)];
+
+        return [];
     }
 }

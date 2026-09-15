@@ -1,5 +1,6 @@
 using TicketFlow.Application.Common.Exceptions;
 using TicketFlow.Application.Common.Interfaces;
+using TicketFlow.Application.Observability;
 
 namespace TicketFlow.Application.Reservations;
 
@@ -14,23 +15,29 @@ public class OrderProcessingService
     private readonly IUnitOfWork _unitOfWork;
     private readonly ICacheService _cache;
     private readonly IRealtimeNotifier _realtimeNotifier;
+    private readonly TicketFlowMetrics _metrics;
 
     public OrderProcessingService(
         IEventRepository eventRepository,
         IOrderRepository orderRepository,
         IUnitOfWork unitOfWork,
         ICacheService cache,
-        IRealtimeNotifier realtimeNotifier)
+        IRealtimeNotifier realtimeNotifier,
+        TicketFlowMetrics metrics)
     {
         _eventRepository = eventRepository;
         _orderRepository = orderRepository;
         _unitOfWork = unitOfWork;
         _cache = cache;
         _realtimeNotifier = realtimeNotifier;
+        _metrics = metrics;
     }
 
     public async Task ConfirmOrderAsync(Guid orderId, CancellationToken cancellationToken = default)
     {
+        using var activity = TicketFlowActivitySource.Instance.StartActivity("ConfirmOrder");
+        activity?.SetTag("ticketflow.order_id", orderId);
+
         var order = await _orderRepository.GetByIdAsync(orderId, cancellationToken)
             ?? throw new NotFoundException($"Order {orderId} was not found.");
 
@@ -59,5 +66,7 @@ public class OrderProcessingService
             await _realtimeNotifier.NotifySeatStatusChangedAsync(session.Id, seat.Id, seat.Status.ToString(), cancellationToken);
 
         await _realtimeNotifier.NotifyOrderConfirmedAsync(order.UserId, order.Id, cancellationToken);
+
+        _metrics.RecordOrderConfirmed();
     }
 }

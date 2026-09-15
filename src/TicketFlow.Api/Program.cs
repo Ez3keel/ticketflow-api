@@ -5,6 +5,8 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Trace;
 using Scalar.AspNetCore;
 using Serilog;
 using TicketFlow.Api.RateLimiting;
@@ -12,6 +14,7 @@ using TicketFlow.Application.Auth;
 using TicketFlow.Application.Events;
 using TicketFlow.Application.Reservations;
 using TicketFlow.Infrastructure;
+using TicketFlow.Infrastructure.Observability;
 using TicketFlow.Infrastructure.Persistence;
 using TicketFlow.Infrastructure.Realtime;
 using TicketFlow.Infrastructure.Security;
@@ -52,6 +55,10 @@ builder.Services.AddSwaggerGen(options =>
 });
 
 builder.Services.AddInfrastructure(builder.Configuration);
+
+builder.Services.AddTicketFlowObservability(builder.Configuration, "TicketFlow.Api")
+    .WithTracing(tracing => tracing.AddAspNetCoreInstrumentation())
+    .WithMetrics(metrics => metrics.AddAspNetCoreInstrumentation().AddPrometheusExporter());
 
 builder.Services.AddScoped<AuthService>();
 builder.Services.AddScoped<EventCatalogService>();
@@ -199,6 +206,7 @@ app.UseRateLimiter();
 
 app.MapControllers();
 app.MapHub<TicketFlowHub>("/hubs/ticketflow");
+app.MapPrometheusScrapingEndpoint("/metrics");
 
 app.Run();
 
